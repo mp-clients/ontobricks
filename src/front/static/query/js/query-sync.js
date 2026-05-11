@@ -140,6 +140,44 @@ function _setSyncTile(tileId, value, state) {
  * Apply DT-existence data obtained from the consolidated endpoint.
  * Mirrors _loadDtExistence() rendering without the separate fetch.
  */
+/**
+ * Build page: labels and options depend on global Graph DB engine (Ladybug vs Lakebase).
+ */
+function _applyBuildGraphEngineUi(dtExist) {
+    var dt = dtExist || {};
+    var cfg = window.__TRIPLESTORE_CONFIG || {};
+    var eng = dt.graph_engine || cfg.graph_engine || 'ladybug';
+    cfg.graph_engine = eng;
+    window.__TRIPLESTORE_CONFIG = cfg;
+
+    var fnLb = document.getElementById('graphEngineFootnoteLadybug');
+    var fnLk = document.getElementById('graphEngineFootnoteLakebase');
+    if (fnLb && fnLk) {
+        if (eng === 'lakebase') {
+            fnLb.classList.add('d-none');
+            fnLk.classList.remove('d-none');
+        } else {
+            fnLb.classList.remove('d-none');
+            fnLk.classList.add('d-none');
+        }
+    }
+
+    var title = document.getElementById('dtGraphBackendTitle');
+    if (title) {
+        title.textContent = eng === 'lakebase' ? 'Graph DB (Postgres)' : 'Graph DB Digital Twin';
+    }
+    var sub = document.getElementById('dtGraphStorageSubtitle');
+    if (sub) {
+        sub.textContent = eng === 'lakebase'
+            ? 'Lakebase Postgres (flat triple table)'
+            : 'Local graph database';
+    }
+    var regRow = document.getElementById('dtRegistryArchiveRow');
+    if (regRow) {
+        regRow.style.display = eng === 'lakebase' ? 'none' : '';
+    }
+}
+
 function _applyDtExistence(data) {
     function _badge(flag, okText, failText, unknownText) {
         if (flag === true)
@@ -184,8 +222,12 @@ function _applyDtExistence(data) {
 
     var reloadBtn = document.getElementById('dtReloadFromRegistry');
     if (reloadBtn) {
-        if (data.registry_lbug_exists === true) reloadBtn.classList.remove('d-none');
-        else reloadBtn.classList.add('d-none');
+        var skipReload = data.registry_archive_applicable === false;
+        if (!skipReload && data.registry_lbug_exists === true) {
+            reloadBtn.classList.remove('d-none');
+        } else {
+            reloadBtn.classList.add('d-none');
+        }
     }
 
     var graphCard = document.getElementById('dtGraphCard');
@@ -267,16 +309,20 @@ async function initSyncSection() {
     if (overlay) overlay.classList.remove('d-none');
 
     try {
+        _applyBuildGraphEngineUi(window.__TRIPLESTORE_CONFIG || {});
+
         var payload = await loadSyncInfo();
 
         var cfg = window.__TRIPLESTORE_CONFIG || {};
 
         const di = payload && (payload.domain_info || payload.project_info);
         if (di && di.success && di.info) {
+            const prevEng = cfg.graph_engine || 'ladybug';
             cfg = {
                 view_table: di.info.view_table || '',
                 graph_name: di.info.graph_name || '',
-                cache: {}
+                graph_engine: prevEng,
+                cache: {},
             };
             window.__TRIPLESTORE_CONFIG = cfg;
         }
@@ -298,6 +344,7 @@ async function initSyncSection() {
         if (columnsArea) columnsArea.classList.remove('d-none');
 
         if (payload && payload.dt_existence) {
+            _applyBuildGraphEngineUi(payload.dt_existence);
             _applyDtExistence(payload.dt_existence);
         }
 
@@ -594,8 +641,6 @@ async function startTripleStoreSync() {
 
     var buildModeEl = document.querySelector('input[name="buildMode"]:checked');
     var buildMode = buildModeEl ? buildModeEl.value : 'incremental';
-    var archiveEl = document.getElementById('syncArchiveToRegistry');
-    var archiveToRegistry = archiveEl ? archiveEl.checked : true;
 
     // Disable button and menus
     const btn = document.getElementById('syncStartBtn');
@@ -616,8 +661,7 @@ async function startTripleStoreSync() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                build_mode: buildMode,
-                archive_to_registry: archiveToRegistry
+                build_mode: buildMode
             }),
             credentials: 'same-origin'
         });
@@ -1052,9 +1096,7 @@ function _formatBuildLogAsText(task) {
         if (r.view_table)               lines.push('View table      : ' + r.view_table);
         if (r.graph_name)               lines.push('Graph name      : ' + r.graph_name);
         if (r.duration_seconds != null) lines.push('Duration (s)    : ' + r.duration_seconds);
-        if (r.archive_to_registry === false) {
-            lines.push('Registry archive: skipped (checkbox off)');
-        } else if (r.archive_background) {
+        if (r.archive_background) {
             const archiveTask = r.archive_task_id ? `task ${r.archive_task_id}` : 'background task';
             lines.push(`Registry archive: started in background (${archiveTask}; upload may still be running)`);
         }

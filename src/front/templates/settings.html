@@ -164,64 +164,157 @@
             <!-- ==================== LADYBUGDB TAB ==================== -->
             <div class="tab-pane fade" id="pane-ladybugdb" role="tabpanel" aria-labelledby="tab-ladybugdb">
 
+                <div id="graphDbTabLoadingBanner" class="alert alert-light border d-none align-items-center justify-content-center gap-2 py-3 mb-3" role="status" aria-live="polite">
+                    <span class="spinner-border spinner-border-sm text-primary" aria-hidden="true"></span>
+                    <span class="text-muted small">Loading Graph DB settings…</span>
+                </div>
+
                 <!-- Graph DB Engine selector -->
                 <div class="mb-4">
-                    <label for="graphEngineSelect" class="form-label fw-semibold">
+                    <label for="graphEngineSelect" class="form-label fw-semibold mb-2">
                         Graph DB Engine
                         <span class="badge bg-warning-subtle text-warning-emphasis border ms-2" style="font-size:0.65rem;">
                             <i class="bi bi-shield-lock me-1"></i>Admin only
                         </span>
                     </label>
-                    <div class="d-flex align-items-center gap-2">
-                        <select class="form-select form-select-sm" id="graphEngineSelect" style="max-width:20rem;">
-                            <option value="ladybug">Internal (LadybugDB)</option>
-                        </select>
-                        <button type="button" class="btn btn-sm btn-primary" id="btnSaveGraphEngine">
-                            <i class="bi bi-check-circle me-1"></i> Save
-                        </button>
-                    </div>
-                    <small class="text-muted">Selects the graph database engine used for building and querying knowledge graphs.</small>
+                    <select class="form-select form-select-sm" id="graphEngineSelect" style="max-width:22rem;">
+                        <option value="ladybug">Internal (LadybugDB)</option>
+                        <option value="lakebase">Lakebase (Postgres)</option>
+                    </select>
+                    <small class="text-muted d-block mt-2">
+                        Selects the graph database engine used for building and querying knowledge graphs.
+                        For <strong>Lakebase (Postgres)</strong> use the form above; <strong>Save</strong> at the top persists it.
+                        Optional raw JSON is under <em>Advanced</em> below.
+                    </small>
                 </div>
 
-                <!-- Graph DB Engine Configuration -->
-                <div class="mb-4">
-                    <label for="graphEngineConfig" class="form-label fw-semibold">
-                        Engine Configuration
-                        <span class="badge bg-warning-subtle text-warning-emphasis border ms-2" style="font-size:0.65rem;">
-                            <i class="bi bi-shield-lock me-1"></i>Admin only
-                        </span>
-                    </label>
-                    <textarea class="form-control font-monospace" id="graphEngineConfig"
-                              rows="6" placeholder="{}" spellcheck="false">{}</textarea>
-                    <div class="d-flex justify-content-between align-items-start mt-2">
-                        <small class="text-muted">
-                            Engine-specific configuration as JSON. Passed to the graph DB wrapper on init.
-                            For LadybugDB an empty <code>{}</code> is sufficient.
-                        </small>
-                        <button type="button" class="btn btn-sm btn-primary ms-2" id="btnSaveGraphEngineConfig">
-                            <i class="bi bi-check-circle me-1"></i> Save
+                <div class="mb-4 border rounded p-3 bg-body-secondary" id="lakebaseGraphPanel" style="display:none;">
+                    <div class="fw-semibold mb-2"><i class="bi bi-database me-1"></i> Lakebase connection</div>
+                    <p class="small text-muted mb-0">
+                        Uses the Lakebase instance bound to this App (<code>PGHOST</code>). Pick a Postgres database
+                        on that instance; triples are stored in the schema below.
+                    </p>
+                    <hr class="my-3 opacity-25">
+                    <div class="row g-3">
+                        <div class="col-12 col-lg-6">
+                            <label for="lakebaseGraphDb" class="form-label small fw-semibold mb-1">Postgres database</label>
+                            <select class="form-select form-select-sm" id="lakebaseGraphDb" aria-describedby="lakebaseGraphDbHelp">
+                                <option value="">(default — bound database)</option>
+                            </select>
+                            <div id="lakebaseGraphDbHelp" class="form-text small mt-2 mb-0"></div>
+                        </div>
+                        <div class="col-12 col-lg-6">
+                            <label for="lakebaseGraphSchema" class="form-label small fw-semibold mb-1">Schema</label>
+                            <input type="text" class="form-control form-control-sm font-monospace" id="lakebaseGraphSchema"
+                                   value="ontobricks_graph" maxlength="63" autocomplete="off"
+                                   aria-describedby="lakebaseGraphSchemaHelp">
+                            <div id="lakebaseGraphSchemaHelp" class="form-text small mt-2 mb-0 text-muted">
+                                Postgres schema for triple tables on Lakebase. When <strong>Settings → Registry</strong> has a Volume triplet, OntoBricks <strong>always</strong> uses that UC schema name for the graph store and managed-sync registration (this field is only a fallback if the registry schema is missing).
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr class="my-3 opacity-25">
+                    <div class="fw-semibold mb-2"><i class="bi bi-lightning-charge me-1"></i> Bulk loading</div>
+                    <p class="small text-muted mb-3 mb-lg-2">
+                        Choose how R2RML triples reach Postgres. Most workspaces start with <strong>App-managed</strong>.
+                        <strong>Managed sync</strong> delegates bulk copy to Databricks Lakeflow (needs UC registration).
+                    </p>
+                    <div class="row g-3 align-items-start">
+                        <div class="col-12">
+                            <label for="lakebaseSyncMode" class="form-label small fw-semibold mb-1">Mode</label>
+                            <select class="form-select form-select-sm" id="lakebaseSyncMode" aria-describedby="lakebaseSyncModeHelp">
+                                <option value="app_managed">App-managed — stream from SQL warehouse into Postgres (default)</option>
+                                <option value="managed_synced">Managed sync — Lakeflow syncs the Delta view to Postgres (data plane)</option>
+                            </select>
+                            <div id="lakebaseSyncModeHelp" class="form-text small mt-2 mb-0">
+                                <span data-lk-mode="app_managed">The app runs the warehouse query and COPYs rows; no Unity Catalog object is required for the load.</span>
+                                <span data-lk-mode="managed_synced" class="d-none">Lakeflow keeps a synced table; the app only orchestrates. Requires a valid <code>catalog.schema</code> in Unity Catalog for registration.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="lakebaseManagedSyncPanel" class="border rounded p-3 mt-3 bg-body-tertiary d-none">
+                        <div class="fw-semibold small mb-2">Managed sync options</div>
+                        <div class="row g-3">
+                            <div class="col-12 col-lg-6">
+                                <label for="lakebaseSyncTableMode" class="form-label small fw-semibold mb-1">Lakeflow schedule</label>
+                                <select class="form-select form-select-sm" id="lakebaseSyncTableMode">
+                                    <option value="snapshot">Snapshot — full refresh on trigger (good default)</option>
+                                    <option value="triggered">Triggered — refresh when you trigger</option>
+                                    <option value="continuous">Continuous — keep near real-time</option>
+                                </select>
+                                <div class="form-text small mt-1 mb-0 text-muted">How often Lakeflow updates the Postgres mirror.</div>
+                            </div>
+                            <div class="col-12 col-lg-6">
+                                <label for="lakebaseSyncTimeout" class="form-label small fw-semibold mb-1">Sync wait (seconds)</label>
+                                <input type="number" class="form-control form-control-sm" id="lakebaseSyncTimeout"
+                                       min="1" max="86400" step="1" value="600" autocomplete="off">
+                                <div class="form-text small mt-1 mb-0 text-muted">How long a build waits for a sync run to finish.</div>
+                            </div>
+                            <div class="col-12">
+                                <label for="lakebaseUcCatalog" class="form-label small fw-semibold mb-1">Unity Catalog (registration)</label>
+                                <input type="text" class="form-control form-control-sm font-monospace" id="lakebaseUcCatalog"
+                                       list="lakebaseUcCatalogDatalist" placeholder="e.g. main (or empty: Registry catalog, then domain Delta)" autocomplete="off"
+                                       aria-describedby="lakebaseUcCatalogHelp">
+                                <datalist id="lakebaseUcCatalogDatalist"></datalist>
+                                <div id="lakebaseUcCatalogHelp" class="form-text small mt-2 mb-0 text-muted">
+                                    Unity Catalog catalog for <em>synced table</em> registration. If empty: <code>ONTBRICKS_SYNC_UC_CATALOG</code>, then <strong>Registry</strong> catalog, then domain Delta. The UC <strong>schema</strong> segment matches the Registry Volume schema when configured (not this field). Ensure <code>CREATE SCHEMA catalog.volume_schema</code> exists in UC if the API reports a missing schema.
+                                </div>
+                                <div id="lakebaseUcCatalogLoadMsg" class="form-text small mt-1 d-none text-warning"></div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mt-2">
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnLoadUcCatalogs" title="Load catalog names from the workspace">
+                            <i class="bi bi-arrow-down-circle me-1"></i> Load UC catalog names
                         </button>
                     </div>
-                    <div id="graphEngineConfigError" class="text-danger small mt-1" style="display:none;"></div>
-                </div>
 
-                <hr class="my-3">
-
-                <p class="text-muted small mb-3">
-                    Local Graph DB files stored in <code>/tmp/ontobricks</code>.
-                    These files are automatically synced to the registry Volume when saving a domain.
-                </p>
-
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <h6 class="mb-0"><i class="bi bi-folder2-open me-1"></i> Local Graph Files</h6>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshLadybugFiles" title="Refresh file list">
-                        <i class="bi bi-arrow-clockwise"></i>
+                    <hr class="my-3 opacity-25">
+                    <div class="fw-semibold mb-2"><i class="bi bi-heart-pulse me-1"></i> Lakebase health &amp; connection info</div>
+                    <p class="small text-muted mb-2">
+                        Read-only probe against the <strong>saved</strong> engine JSON in the registry (use <strong>Save</strong> above after edits).
+                        Confirms the App-bound Postgres instance reaches the configured database and graph schema.
+                    </p>
+                    <div id="lakebaseGraphHealthMessage" class="small mb-2" style="display:none;"></div>
+                    <dl class="row small mb-2" id="lakebaseGraphHealthDl"></dl>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshLakebaseGraphHealth" title="Refresh health probe">
+                        <i class="bi bi-arrow-clockwise me-1"></i> Refresh health
                     </button>
                 </div>
 
-                <div id="ladybugFilesContainer">
-                    <div class="text-center text-muted small py-4">
-                        <span class="spinner-border spinner-border-sm me-1"></span> Loading files...
+                <!-- Optional raw JSON (advanced) -->
+                <details class="mb-4" id="graphEngineConfigDetails">
+                    <summary class="form-label fw-semibold mb-2 user-select-none" style="cursor:pointer;">
+                        Advanced: raw engine configuration (JSON)
+                        <span class="badge bg-secondary border ms-2" style="font-size:0.65rem;">optional</span>
+                    </summary>
+                    <p class="small text-muted">Form fields above are merged into this object on <strong>Save</strong>. Edit only if you need extra keys not exposed in the UI.</p>
+                    <textarea class="form-control font-monospace" id="graphEngineConfig"
+                              rows="6" placeholder="{}" spellcheck="false">{}</textarea>
+                    <div id="graphEngineConfigError" class="text-danger small mt-2" style="display:none;"></div>
+                </details>
+
+                <div id="ladybugLocalFilesWrap" style="display:none;">
+                    <hr class="my-3">
+
+                    <p class="text-muted small mb-3">
+                        LadybugDB stores graph files locally under <code>/tmp/ontobricks</code>
+                        and syncs archives to the registry Volume when saving a domain.
+                    </p>
+
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <h6 class="mb-0"><i class="bi bi-folder2-open me-1"></i> Local Graph Files</h6>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btnRefreshLadybugFiles" title="Refresh file list">
+                            <i class="bi bi-arrow-clockwise"></i>
+                        </button>
+                    </div>
+
+                    <div id="ladybugFilesContainer">
+                        <div class="text-center text-muted small py-4">
+                            <span class="spinner-border spinner-border-sm me-1"></span> Loading files...
+                        </div>
                     </div>
                 </div>
             </div>

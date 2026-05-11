@@ -8,7 +8,7 @@ graph on every sync.
 from __future__ import annotations
 
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 from back.core.logging import get_logger
 from back.core.errors import ValidationError, InfrastructureError
@@ -156,6 +156,22 @@ class IncrementalBuildService:
     # Server-side diff
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _added_sql(view_table: str, snapshot_table: str) -> str:
+        return (
+            f"SELECT subject, predicate, object FROM {view_table} "
+            f"EXCEPT "
+            f"SELECT subject, predicate, object FROM {snapshot_table}"
+        )
+
+    @staticmethod
+    def _removed_sql(view_table: str, snapshot_table: str) -> str:
+        return (
+            f"SELECT subject, predicate, object FROM {snapshot_table} "
+            f"EXCEPT "
+            f"SELECT subject, predicate, object FROM {view_table}"
+        )
+
     def compute_diff(
         self,
         view_table: str,
@@ -165,16 +181,18 @@ class IncrementalBuildService:
 
         Returns ``(to_add, to_remove)`` where each is a list of
         ``{"subject": ..., "predicate": ..., "object": ...}`` dicts.
+
+        .. note::
+           Materializes both diff sides in memory. The Digital Twin build
+           pipeline now prefers :meth:`count_diff` + :meth:`iter_added` /
+           :meth:`iter_removed` so the FastAPI process never holds the full
+           diff for large graphs.
         """
         to_add = self._client.execute_query(
-            f"SELECT subject, predicate, object FROM {view_table} "
-            f"EXCEPT "
-            f"SELECT subject, predicate, object FROM {snapshot_table}"
+            self._added_sql(view_table, snapshot_table)
         )
         to_remove = self._client.execute_query(
-            f"SELECT subject, predicate, object FROM {snapshot_table} "
-            f"EXCEPT "
-            f"SELECT subject, predicate, object FROM {view_table}"
+            self._removed_sql(view_table, snapshot_table)
         )
         logger.info(
             "Incremental diff: %d additions, %d removals",
@@ -182,6 +200,64 @@ class IncrementalBuildService:
             len(to_remove),
         )
         return to_add or [], to_remove or []
+
+    def count_diff(
+        self,
+        view_table: str,
+        snapshot_table: str,
+    ) -> Tuple[int, int]:
+        """Return ``(add_count, remove_count)`` without materializing diff rows.
+
+        Both COUNTs run server-side in Databricks SQL; the app sees one int
+        per side instead of the full triple lists. Used by the build pipeline
+        to size the fallback-to-full heuristic before deciding whether to
+        stream the diff into the graph store.
+        """
+        add_rows = self._client.execute_query(
+            f"SELECT COUNT(*) AS cnt FROM ("
+            f"{self._added_sql(view_table, snapshot_table)}"
+            f") AS d"
+        )
+        rm_rows = self._client.execute_query(
+            f"SELECT COUNT(*) AS cnt FROM ("
+            f"{self._removed_sql(view_table, snapshot_table)}"
+            f") AS d"
+        )
+        add_n = int(add_rows[0].get("cnt", 0)) if add_rows else 0
+        rm_n = int(rm_rows[0].get("cnt", 0)) if rm_rows else 0
+        return add_n, rm_n
+
+    def iter_added(
+        self,
+        view_table: str,
+        snapshot_table: str,
+        batch_size: int = 5000,
+    ) -> Iterator[Dict[str, str]]:
+        """Stream the *additions* side of the diff (rows in VIEW \\ snapshot)."""
+        if not hasattr(self._client, "iter_rows"):
+            raise InfrastructureError(
+                "Source client does not support row streaming (iter_rows)."
+            )
+        return self._client.iter_rows(
+            self._added_sql(view_table, snapshot_table),
+            batch_size=batch_size,
+        )
+
+    def iter_removed(
+        self,
+        view_table: str,
+        snapshot_table: str,
+        batch_size: int = 5000,
+    ) -> Iterator[Dict[str, str]]:
+        """Stream the *removals* side of the diff (rows in snapshot \\ VIEW)."""
+        if not hasattr(self._client, "iter_rows"):
+            raise InfrastructureError(
+                "Source client does not support row streaming (iter_rows)."
+            )
+        return self._client.iter_rows(
+            self._removed_sql(view_table, snapshot_table),
+            batch_size=batch_size,
+        )
 
     def should_fallback_to_full(
         self,

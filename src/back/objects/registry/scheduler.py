@@ -1021,30 +1021,155 @@ def _generate_sql_from_r2rml(domain, domain_name: str):
     return res["sql"], view_table, graph_name, base_uri, ent, rels
 
 
+def _stream_into_store(store, src, graph_name: str, select_sql: str, batch: int = 5000) -> int:
+    """Stream warehouse rows into ``store.bulk_insert_iter`` (or list fallback)."""
+    rows = src.iter_rows(select_sql, batch_size=batch)
+    if hasattr(store, "bulk_insert_iter"):
+        return store.bulk_insert_iter(graph_name, rows, batch_size=batch)
+    return store.insert_triples(graph_name, list(rows), batch_size=min(batch, 500))
+
+
+def _stream_out_of_store(store, src, graph_name: str, select_sql: str, batch: int = 5000) -> int:
+    """Stream warehouse rows into ``store.bulk_delete_iter`` (or list fallback)."""
+    rows = src.iter_rows(select_sql, batch_size=batch)
+    if hasattr(store, "bulk_delete_iter"):
+        return store.bulk_delete_iter(graph_name, rows, batch_size=batch)
+    return store.delete_triples(graph_name, list(rows), batch_size=min(batch, 500))
+
+
+def _is_managed_synced(store) -> bool:
+    """Lakebase store in managed_synced mode -- bulk goes via Lakeflow."""
+    return bool(getattr(store, "is_synced", False))
+
+
+def _apply_synced_pipeline(
+    store,
+    src,
+    delta_cfg: Dict[str, Any],
+    graph_name: str,
+    view_table: str,
+    *,
+    full: bool,
+    domain_name: str,
+    domain: Any = None,
+    settings: Any = None,
+) -> None:
+    """Trigger the Lakeflow synced-table refresh for *graph_name*.
+
+    Mirrors :meth:`_BuildPipeline._apply_via_synced_pipeline` so scheduled
+    builds also keep bulk data movement on the data plane.
+    """
+    from back.core.graphdb.lakebase.LakebaseFlatStore import (
+        resolve_sync_uc_fallback_catalog,
+    )
+    from back.core.graphdb.lakebase._sync_uc_schema import (
+        ensure_uc_schema_for_synced_table_fqn,
+    )
+
+    mgr = store.synced_manager()
+    if domain is not None and settings is not None:
+        fallback_cat = resolve_sync_uc_fallback_catalog(
+            domain, settings, delta_cfg
+        )
+    else:
+        fallback_cat = (delta_cfg or {}).get("catalog", "")
+    synced_uc = store.synced_uc_name(graph_name, fallback_catalog=fallback_cat)
+    logger.info(
+        "Scheduled build [%s]: managed-sync UC target %s "
+        "(sync_uc_catalog=%r; fallback_catalog=%r; graph_schema=%s)",
+        domain_name,
+        synced_uc,
+        (store.sync_uc_catalog or "").strip() or None,
+        fallback_cat or None,
+        store.graph_schema,
+    )
+    ensure_uc_schema_for_synced_table_fqn(
+        src,
+        synced_uc,
+        task_log_prefix=f"Scheduled build [{domain_name}]",
+    )
+    mgr.ensure(
+        synced_uc,
+        source_table_full_name=view_table,
+        primary_key_columns=["subject", "predicate", "object"],
+        sync_mode=store.sync_table_mode,
+    )
+    store.ensure_synced_companion(graph_name)
+    state = mgr.trigger_and_wait(synced_uc, timeout_s=store.sync_timeout_s)
+    logger.info(
+        "Scheduled build [%s]: synced table %s state=%s",
+        domain_name,
+        synced_uc,
+        state,
+    )
+    store.ensure_synced_union_view(graph_name)
+    if full:
+        try:
+            store.truncate_companion(graph_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Scheduled build [%s]: companion truncate failed (non-fatal): %s",
+                domain_name,
+                exc,
+            )
+
+
 def _write_graph_triples(
     store,
     src,
     graph_name: str,
     view_table: str,
+    snapshot_table: str,
     actual_mode: str,
-    to_add: list,
-    to_remove: list,
+    add_count: int,
+    rm_count: int,
     incr_svc,
     domain_name: str,
+    delta_cfg: Optional[Dict[str, Any]] = None,
+    domain: Any = None,
+    settings: Any = None,
 ) -> int:
-    """Write triples to the graph store. Returns the triple count."""
+    """Write triples to the graph store. Returns the triple count.
+
+    Both row-by-row branches stream from the warehouse via ``iter_rows`` into
+    the graph store's bulk iterator, so the scheduler thread never holds the
+    full graph or the full diff in memory.
+
+    When the store is in Lakebase ``managed_synced`` mode, the entire branch
+    is replaced by a Lakeflow snapshot refresh -- triples never enter this
+    process at all.
+    """
+    if _is_managed_synced(store):
+        _apply_synced_pipeline(
+            store,
+            src,
+            delta_cfg or {},
+            graph_name,
+            view_table,
+            full=actual_mode == "full",
+            domain_name=domain_name,
+            domain=domain,
+            settings=settings,
+        )
+        return incr_svc.count_view_triples(view_table)
+
     if actual_mode == "full":
-        logger.info("Scheduled build [%s]: reading triples from VIEW", domain_name)
-        triples = src.execute_query(f"SELECT * FROM {view_table}")
-        triple_count = len(triples)
+        triple_count = incr_svc.count_view_triples(view_table)
         logger.info(
-            "Scheduled build [%s]: %d triples from VIEW", domain_name, triple_count
+            "Scheduled build [%s]: %d triples reported by VIEW",
+            domain_name,
+            triple_count,
         )
 
         if triple_count > 0:
             store.drop_table(graph_name)
             store.create_table(graph_name)
-            store.insert_triples(graph_name, triples, batch_size=500)
+            _stream_into_store(
+                store,
+                src,
+                graph_name,
+                f"SELECT subject, predicate, object FROM {view_table}",
+            )
             store.optimize_table(graph_name)
             logger.info(
                 "Scheduled build [%s]: graph '%s' populated with %d triples",
@@ -1054,15 +1179,25 @@ def _write_graph_triples(
             )
     else:
         triple_count = incr_svc.count_view_triples(view_table)
-        if to_remove:
-            store.delete_triples(graph_name, to_remove, batch_size=500)
-            logger.info(
-                "Scheduled build [%s]: removed %d triples", domain_name, len(to_remove)
+        if rm_count > 0:
+            removed_sql = (
+                f"SELECT subject, predicate, object FROM {snapshot_table} "
+                f"EXCEPT "
+                f"SELECT subject, predicate, object FROM {view_table}"
             )
-        if to_add:
-            store.insert_triples(graph_name, to_add, batch_size=500)
+            _stream_out_of_store(store, src, graph_name, removed_sql)
             logger.info(
-                "Scheduled build [%s]: added %d triples", domain_name, len(to_add)
+                "Scheduled build [%s]: removed %d triples", domain_name, rm_count
+            )
+        if add_count > 0:
+            added_sql = (
+                f"SELECT subject, predicate, object FROM {view_table} "
+                f"EXCEPT "
+                f"SELECT subject, predicate, object FROM {snapshot_table}"
+            )
+            _stream_into_store(store, src, graph_name, added_sql)
+            logger.info(
+                "Scheduled build [%s]: added %d triples", domain_name, add_count
             )
         store.optimize_table(graph_name)
     return triple_count
@@ -1235,19 +1370,19 @@ def _run_scheduled_build(
         )
 
         actual_mode = "full" if drop_existing else "incremental"
-        to_add: list = []
-        to_remove: list = []
+        add_count = 0
+        rm_count = 0
 
         if actual_mode == "incremental" and incr_svc.snapshot_exists(snapshot_table):
             logger.info("Scheduled build [%s]: computing incremental diff", domain_name)
             try:
-                to_add, to_remove = incr_svc.compute_diff(view_table, snapshot_table)
+                add_count, rm_count = incr_svc.count_diff(view_table, snapshot_table)
                 view_count = incr_svc.count_view_triples(view_table)
                 if incr_svc.should_fallback_to_full(
-                    len(to_add), len(to_remove), view_count
+                    add_count, rm_count, view_count
                 ):
                     actual_mode = "full"
-                elif len(to_add) == 0 and len(to_remove) == 0:
+                elif add_count == 0 and rm_count == 0:
                     triple_count = view_count
                     logger.info(
                         "Scheduled build [%s]: no changes, skipping graph write",
@@ -1294,20 +1429,31 @@ def _run_scheduled_build(
             src,
             graph_name,
             view_table,
+            snapshot_table,
             actual_mode,
-            to_add,
-            to_remove,
+            add_count,
+            rm_count,
             incr_svc,
             domain_name,
+            delta_cfg=getattr(domain, "delta", None) or {},
+            domain=domain,
+            settings=settings,
         )
 
-        try:
-            incr_svc.refresh_snapshot(view_table, snapshot_table)
-            logger.info("Scheduled build [%s]: snapshot refreshed", domain_name)
-        except Exception as snap_e:
-            logger.warning(
-                "Scheduled build [%s]: snapshot refresh failed: %s", domain_name, snap_e
+        if _is_managed_synced(store):
+            logger.info(
+                "Scheduled build [%s]: skipping snapshot CTAS "
+                "(managed_synced — Lakeflow owns the truth)",
+                domain_name,
             )
+        else:
+            try:
+                incr_svc.refresh_snapshot(view_table, snapshot_table)
+                logger.info("Scheduled build [%s]: snapshot refreshed", domain_name)
+            except Exception as snap_e:
+                logger.warning(
+                    "Scheduled build [%s]: snapshot refresh failed: %s", domain_name, snap_e
+                )
 
         tm.update_progress(task.id, 95, "Saving domain metadata...")
         _persist_domain_metadata(svc, domain, version, build_ts, domain_name)

@@ -199,7 +199,8 @@ class DecisionTableEngine:
         if is_cypher:
             query = self.build_violation_cypher(dt, table_name, base_uri, store)
         else:
-            query = self.build_violation_sql(dt, table_name, base_uri)
+            tbl_ref = store.sql_table_reference(table_name)
+            query = self.build_violation_sql(dt, tbl_ref, base_uri)
         if not query:
             logger.warning("Decision table '%s': query builder returned None", dt_name)
             return
@@ -260,7 +261,8 @@ class DecisionTableEngine:
                     single_dt, table_name, base_uri, store
                 )
             else:
-                query = self.build_violation_sql(single_dt, table_name, base_uri)
+                tbl_ref = store.sql_table_reference(table_name)
+                query = self.build_violation_sql(single_dt, tbl_ref, base_uri)
             if not query:
                 continue
             logger.debug(

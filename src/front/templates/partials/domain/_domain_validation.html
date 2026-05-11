@@ -256,12 +256,13 @@
                     <div class="border rounded p-3 h-100" id="psDtGraphCard">
                         <div class="d-flex align-items-center mb-2">
                             <i class="bi bi-diagram-3-fill fs-5 me-2 text-primary"></i>
-                            <strong>Graph DB Digital Twin</strong>
+                            <strong id="psDtGraphBackendTitle">Graph DB Digital Twin</strong>
                             <span id="psDtExistLocal" class="ms-auto"></span>
                         </div>
                         <div class="small">
-                            <div class="text-muted mb-1">Local graph database</div>
-                            <div class="d-flex justify-content-between align-items-center">
+                            <div class="text-muted mb-1" id="psDtGraphStorageSubtitle">Local graph database</div>
+                            <code id="psDtGraphPrimaryCode" class="d-block text-break text-muted mb-2" style="display:none; font-size:.75em;"></code>
+                            <div class="d-flex justify-content-between align-items-center" id="psDtRegistryArchiveRow">
                                 <span class="text-muted">Registry archive</span>
                                 <span id="psDtExistRegistry"></span>
                             </div>

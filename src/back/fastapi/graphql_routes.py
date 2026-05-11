@@ -106,7 +106,7 @@ def _load_domain_from_registry(domain_name, session_mgr, settings):
                 domain_name,
                 session_ver,
             )
-            _ensure_ladybug_synced(domain, svc.uc)
+            _ensure_ladybug_synced(domain, svc.uc, settings)
             return domain
         logger.warning(
             "GraphQL: cannot read session version %s for '%s' (%s) — "
@@ -133,18 +133,24 @@ def _load_domain_from_registry(domain_name, session_mgr, settings):
         version,
     )
 
-    _ensure_ladybug_synced(domain, svc.uc)
+    _ensure_ladybug_synced(domain, svc.uc, settings)
 
     return domain
 
 
-def _ensure_ladybug_synced(domain, uc_service):
+def _ensure_ladybug_synced(domain, uc_service, settings):
     """Pull LadybugDB data from UC Volume to local disk if not already present.
 
     Skips the download when a local ``.lbug`` file already exists so that
     an in-progress build is never overwritten.
     """
     try:
+        from back.objects.digitaltwin.DigitalTwin import DigitalTwin
+
+        if DigitalTwin.resolve_graph_engine(domain, settings) == "lakebase":
+            logger.debug("GraphQL: Lakebase graph engine — skipping LadybugDB sync")
+            return
+
         import os
         from back.core.helpers import (
             effective_uc_version_path,
@@ -193,7 +199,7 @@ def _get_schema_and_context(domain, settings):
     store = get_triplestore(domain, settings, backend="graph")
     if not store:
         raise InfrastructureError(
-            "Graph backend (LadybugDB) not configured or unreachable."
+            "Graph backend not configured or unreachable."
         )
 
     table = effective_graph_name(domain)

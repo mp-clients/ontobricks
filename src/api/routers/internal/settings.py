@@ -760,6 +760,24 @@ async def get_graph_engine_config(
     return config_service.get_graph_engine_config_result(session_mgr, settings)
 
 
+@router.get("/graph-engine/lakebase-health")
+async def get_graph_engine_lakebase_health(
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """Probe Lakebase connectivity and graph schema (saved global config)."""
+    return config_service.graph_engine_lakebase_health_result(session_mgr, settings)
+
+
+@router.get("/graph-engine/uc-catalogs")
+async def get_graph_engine_uc_catalogs(
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """Unity Catalog names for the Lakebase managed-sync UC catalog picker (read-only)."""
+    return config_service.graph_engine_uc_catalogs_result(session_mgr, settings)
+
+
 @router.post("/graph-engine-config")
 async def set_graph_engine_config(
     request: Request,

@@ -47,6 +47,7 @@ RST summaries; see the architecture guide for the full design document.
    api/app.core
    api/app.core.databricks
    api/app.core.graphdb
+   api/app.core.graphdb.lakebase
    api/app.core.graphql
    api/app.core.industry
    api/app.core.reasoning

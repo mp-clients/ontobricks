@@ -93,10 +93,6 @@ class BuildRequest(BaseModel):
     drop_existing: bool = Field(
         False, description="Deprecated: use build_mode='full' instead"
     )
-    archive_to_registry: bool = Field(
-        True,
-        description="When true, upload the LadybugDB graph archive to the registry Volume after build",
-    )
 
 
 class BuildStartedResponse(BaseModel):
@@ -538,7 +534,6 @@ async def dt_build(
             force_full,
             snapshot_version=snap.current_version,
             build_kind="api",
-            archive_to_registry=body.archive_to_registry,
         )
 
     threading.Thread(target=_run, daemon=True).start()

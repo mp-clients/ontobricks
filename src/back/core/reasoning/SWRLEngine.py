@@ -134,7 +134,9 @@ class SWRLEngine:
         if uses_cypher:
             query = translator.build_inference_query(params)
         else:
-            query = translator.build_inference_sql(table_name, params)
+            query = translator.build_inference_sql(
+                store.sql_table_reference(table_name), params
+            )
 
         if not query:
             logger.warning(
@@ -202,7 +204,9 @@ class SWRLEngine:
                         )
                     )
             else:
-                sql = translator.build_materialization_sql(table_name, params)
+                sql = translator.build_materialization_sql(
+                    store.sql_table_reference(table_name), params
+                )
                 if sql:
                     for stmt in sql.split(";\n"):
                         stmt = stmt.strip()

@@ -6,6 +6,18 @@ registration in the factory and global config, and a ready-to-use starter kit.
 
 ---
 
+OntoBricks ships with two **runtime** graph engines selectable under **Settings → Graph DB**
+(admin):
+
+| Engine | Storage | Notes |
+|--------|---------|--------|
+| ``ladybug`` (default) | Embedded LadybugDB (``.lbug``) | Optional sync to the domain Unity Catalog Volume. |
+| ``lakebase`` | Flat triple tables on **Lakebase Postgres** | Uses the App-bound Postgres instance (``PGHOST`` / ``PGDATABASE``…). Configure JSON ``graph_engine_config`` with optional ``database`` (Postgres DB name on that instance) and ``schema`` (default ``ontobricks_graph``). SQL-only (no Cypher); reasoning uses the existing SQL translators. |
+
+``GraphDBFactory.create(engine=...)`` is the single decision point: only the selected engine is instantiated.
+
+---
+
 ## 1. Architecture Overview
 
 OntoBricks has two storage layers for knowledge graph data:
@@ -382,3 +394,171 @@ Cypher, set the flag and return the appropriate translator from
 **Q: Do I need to touch `TripleStoreFactory`?**
 No.  `TripleStoreFactory` reads the engine from `GlobalConfigService` and
 passes it to `GraphDBFactory`.  You only edit `GraphDBFactory`.
+
+---
+
+## 8. Lakebase build performance
+
+When the active engine is **Lakebase**, the Digital Twin build keeps heavy
+data on the Databricks side and never holds the full triple set inside the
+FastAPI process.
+
+### Read side (Databricks SQL → app)
+
+`SQLWarehouse.iter_rows(query, batch_size=5000)` opens a cursor on the
+warehouse and yields dict rows in `fetchmany` batches. The build pipeline
+uses it for both the full rebuild (`SELECT subject, predicate, object FROM
+view`) and each side of the incremental `EXCEPT` diff. The diff size that
+gates the fall-back-to-full heuristic comes from
+`IncrementalBuildService.count_diff` — two server-side `SELECT COUNT(*)`
+queries, one int per side, no row materialization.
+
+### Write side (app → Lakebase Postgres)
+
+`LakebaseFlatStore` exposes two streaming bulk paths used by the pipeline:
+
+- `bulk_insert_iter(table, triple_iter, batch_size=5000)` — per batch:
+  `CREATE TEMP TABLE _ob_copy_stage … ON COMMIT DROP`, `COPY FROM STDIN`
+  (binary), then `INSERT INTO {phy} … SELECT FROM _ob_copy_stage ON CONFLICT
+  DO NOTHING`. The temp table lives only inside the per-batch transaction
+  (`conn.transaction()` is needed because the pool runs `autocommit=True`).
+- `bulk_delete_iter(table, triple_iter, batch_size=5000)` — symmetrical
+  `COPY` into `_ob_del_stage` followed by `DELETE FROM {phy} USING
+  _ob_del_stage d WHERE …`. Replaces the per-row `DELETE` loop on the
+  incremental remove path.
+
+`insert_triples` / `delete_triples` keep their public signatures and
+delegate to the bulk iterator paths once the payload crosses
+`_BULK_INSERT_THRESHOLD` / `_BULK_DELETE_THRESHOLD` (50 rows).
+
+### Pipeline gating
+
+`_BuildPipeline._stream_triples_into_store` and
+`_stream_triples_out_of_store` call `bulk_insert_iter` /
+`bulk_delete_iter` when the store exposes them (Lakebase) and fall back to
+materializing the iterator into a list for backends without a streaming
+write path (e.g. LadybugDB). `_start_background_archive` is a no-op when
+the engine is Lakebase: Postgres is the system of record, there is no
+`.lbug` archive to push to the Volume.
+
+---
+
+## 9. Lakebase managed-synced mode (data plane only)
+
+The default Lakebase mode (`sync_mode = "app_managed"`) still flows R2RML
+triples through the FastAPI process via `iter_rows` + `COPY FROM STDIN`.
+Bounded memory, but the app is on the hot path.
+
+`sync_mode = "managed_synced"` moves the bulk movement out of the app
+entirely: a Databricks **Lakeflow snapshot pipeline** keeps a Postgres
+**synced table** in lock-step with the R2RML view, and the app only
+orchestrates. Reasoning + cohort writes (small volumes) keep their direct
+PG path through a writable **companion table**; readers see both via a
+**UNION view** with the legacy table name, so SPARQL / KG search code is
+unchanged.
+
+### Postgres layout per graph version
+
+| Object | Owner | Purpose |
+|--------|-------|---------|
+| `g_<dom>_v<n>_sync` | Lakeflow (read-only) | Mirrors the source view via snapshot. |
+| `g_<dom>_v<n>__app`  | App (read/write)     | Reasoning + cohort triples (datatype/lang aware). |
+| `g_<dom>_v<n>`       | App DDL (`CREATE OR REPLACE VIEW`) | UNION view readers query (back-compat name). |
+
+The synced side is restricted to `(subject, predicate, object)` — the union
+view NULL-pads `datatype` / `lang` for those rows so the view exposes a
+uniform 5-column shape.
+
+### Configuration
+
+`graph_engine_config` accepts the following extra keys (all optional):
+
+```jsonc
+{
+  "schema": "ontobricks_graph",         // fallback PG schema only when Registry has no Volume schema
+  "database": "appdb",                   // PG database (overrides PGDATABASE)
+  "sync_mode": "managed_synced",         // default: "app_managed"
+  "sync_table_mode": "snapshot",         // snapshot | triggered | continuous
+  "sync_timeout_s": 600,                  // wait deadline for a sync run
+  "sync_uc_catalog": "main"              // UC catalog for synced table registration (optional override)
+}
+```
+
+Sync UC naming is `<sync_uc_catalog or fallback>.<schema>.<table>` where **schema**
+is resolved by ``resolve_lakebase_graph_schema``: **Registry Volume schema**
+(``RegistryCfg.schema``) **always wins** when Settings → Registry resolves to a
+non-empty triplet; otherwise ``graph_engine_config.schema`` (default
+``ontobricks_graph``). Together with catalog fallback from the same Registry,
+managed-synced tables register under the **same ``catalog.schema`` as the Volume**.
+
+### Unity Catalog Explorer — graph triples + synced table
+
+Open **Catalog Explorer** at ``<catalog>.<registry_volume_schema>``: graph triple
+tables, companion, union view, and the UC synced-table registration share that
+schema segment once the store is constructed (see build log
+``Managed-sync registers UC synced table at …``).
+
+`validate_engine_config_keys` enforces the type and value constraints.
+
+### Build pipeline branch
+
+`_BuildPipeline._apply_via_synced_pipeline(full=...)` replaces the row-level
+ingest in synced mode:
+
+1. Resolve the synced UC FQN as `<catalog>.<schema>.<base>_sync` where
+   *catalog* is: ``graph_engine_config.sync_uc_catalog`` if set; otherwise
+   ``resolve_sync_uc_fallback_catalog`` — optional deployment env
+   ``ONTBRICKS_SYNC_UC_CATALOG``, then **Settings → Registry** UC catalog,
+   then ``domain.delta.catalog`` (per-domain Delta catalog). This avoids
+   registering the synced table under a personal/home UC catalog when the
+   registry triplet points at the team catalog.
+2. ``CREATE SCHEMA IF NOT EXISTS`` for that **Unity Catalog** ``catalog.schema``
+   (SQL warehouse DDL). The synced-table API requires this metastore object;
+   Postgres schema alone on Lakebase is not enough.
+   See ``_sync_uc_schema.ensure_uc_schema_for_synced_table_fqn``.
+3. `SyncedTableManager.ensure(...)` -- idempotent
+   `WorkspaceClient.database.create_synced_database_table` call.
+4. `LakebaseFlatStore.ensure_synced_companion(name)` — companion table only
+   (must run before Lakeflow materializes the ``_sync`` table).
+5. `SyncedTableManager.trigger_and_wait(...)` — calls `trigger_refresh`
+   (`pipelines.start_update` with ``full_refresh=True``), then waits on the
+   returned **update id** via ``pipelines.get_update`` until that Lakeflow run
+   finishes (so we do not mistake a stale ``ONLINE`` synced-table status for the
+   new build). If ``start_update`` was skipped because another update was already
+   active, it falls back to ``wait_get_pipeline_idle`` plus synced-table polling.
+6. `LakebaseFlatStore.ensure_synced_union_view(name)` — union view after the ``_sync`` table
+   exists in Postgres (``CREATE OR REPLACE VIEW`` references the synced table).
+7. On full rebuild, `TRUNCATE` the companion so reasoning + cohort start
+   from a clean slate.
+
+`_compute_diff_or_fall_through` short-circuits to `actual_mode = "full"` in
+synced mode -- snapshot pipelines always rewrite the table, so a row-level
+diff is wasted work. `_refresh_snapshot` is also skipped (Lakeflow is the
+truth).
+
+The scheduler mirrors this logic via `_apply_synced_pipeline` in
+`back/objects/registry/scheduler.py`.
+
+### Read paths
+
+`LakebaseFlatStore` separates the resolvers:
+
+- `_writable_table_id(name)` -- companion in synced mode, legacy phy in
+  app-managed mode (used by `insert_triples`, COPY insert, COPY delete,
+  `delete_triples`).
+- `_readable_table_id(name)` -- union view in synced mode (same identifier
+  as the legacy phy in app-managed mode), used by `query_triples`,
+  `iter_triples`, `count_triples`, `table_exists`, `get_status`.
+- `optimize_table` vacuums only the writable companion in synced mode (the
+  synced side is Lakeflow-managed).
+
+### Lifecycle
+
+`LakebaseFlatStore.drop_table(name)` cascades in synced mode:
+1. `DROP VIEW IF EXISTS` for the union view.
+2. `DROP TABLE IF EXISTS` for the companion.
+3. `SyncedTableManager.delete(uc_name, purge_data=True)` to remove the
+   synced table from UC and its underlying PG table.
+
+If the SDK or UC catalog is unavailable, the cascade still drops the PG
+view + companion and logs a warning rather than aborting.

@@ -129,7 +129,9 @@ class SPARQLRuleEngine:
                 store,
             )
         else:
-            sql = self._construct_to_sql(query, table_name, ontology)
+            sql = self._construct_to_sql(
+                query, store.sql_table_reference(table_name), ontology
+            )
 
         if not sql:
             logger.warning(

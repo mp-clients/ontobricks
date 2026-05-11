@@ -173,7 +173,6 @@ async def start_triplestore_sync(
     data = await request.json()
     build_mode = data.get("build_mode", "incremental")
     force_full = build_mode == "full" or data.get("drop_existing", False)
-    archive_to_registry = bool(data.get("archive_to_registry", True))
 
     domain = get_domain(session_mgr)
 
@@ -283,7 +282,6 @@ async def start_triplestore_sync(
             config_changed=config_changed,
             snapshot_version=getattr(domain, "current_version", "1") or "1",
             build_kind="session",
-            archive_to_registry=archive_to_registry,
         )
 
     thread = threading.Thread(target=run_sync, daemon=True)

@@ -704,8 +704,9 @@ class Domain:
                 self._s.save()
                 clear_version_status_cache()
                 invalidate_registry_cache()
-                msg = f"Domain saved to {c.catalog}.{c.schema}.{c.volume}/domains/{folder}/V{version}/V{version}.json"
-                return {"success": True, "message": msg}
+                reg_path = f"{c.catalog}.{c.schema}.{c.volume}/domains/{folder}/V{version}/V{version}.json"
+                logger.info("Domain saved to registry: %s", reg_path)
+                return {"success": True, "message": "Domain saved"}
             raise InfrastructureError(
                 "Failed to save domain to Unity Catalog registry", detail=message
             )
@@ -889,10 +890,11 @@ class Domain:
             self._s.clear_generated_content()
             self._s.save()
             invalidate_registry_cache()
-            msg = (
-                f"Version {new_version} created: "
+            reg_path = (
                 f"{c.catalog}.{c.schema}.{c.volume}/domains/{folder}/V{new_version}/V{new_version}.json"
             )
+            logger.info("New domain version written: %s", reg_path)
+            msg = f"Version {new_version} created"
             if copied:
                 msg += f" ({copied} document(s) carried over)"
             return {

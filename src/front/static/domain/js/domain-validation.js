@@ -461,7 +461,33 @@ function updateDtwinCard(data) {
         snapshotArea.style.display = 'none';
     }
 
-    // Graph DB card
+    // Graph DB card — labels depend on global graph engine (Ladybug vs Lakebase)
+    var eng = dt.graph_engine || 'ladybug';
+    var titleGraph = document.getElementById('psDtGraphBackendTitle');
+    if (titleGraph) {
+        titleGraph.textContent = eng === 'lakebase' ? 'Graph DB (Postgres)' : 'Graph DB Digital Twin';
+    }
+    var subGraph = document.getElementById('psDtGraphStorageSubtitle');
+    if (subGraph) {
+        subGraph.textContent = eng === 'lakebase'
+            ? 'Lakebase Postgres (flat triple table)'
+            : 'Local graph database';
+    }
+    var regRowPs = document.getElementById('psDtRegistryArchiveRow');
+    if (regRowPs) {
+        regRowPs.style.display = eng === 'lakebase' ? 'none' : '';
+    }
+    var primaryCode = document.getElementById('psDtGraphPrimaryCode');
+    if (primaryCode) {
+        if (eng === 'lakebase' && dt.local_lbug_path) {
+            primaryCode.textContent = dt.local_lbug_path;
+            primaryCode.style.display = '';
+        } else {
+            primaryCode.textContent = '';
+            primaryCode.style.display = 'none';
+        }
+    }
+
     var localEl = document.getElementById('psDtExistLocal');
     if (localEl) localEl.innerHTML = _dtBadge(dt.local_lbug_exists, 'Loaded', 'Not loaded', 'N/A');
 

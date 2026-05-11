@@ -3,6 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, call
 
+from back.core.errors import InfrastructureError
 from back.core.triplestore.IncrementalBuildService import IncrementalBuildService
 
 
@@ -222,3 +223,52 @@ class TestCountViewTriples:
         client.execute_query.side_effect = Exception("fail")
         svc = IncrementalBuildService(client)
         assert svc.count_view_triples("view") == 0
+
+
+class TestStreamingDiff:
+    """Streaming variant of ``compute_diff`` used by the build pipeline."""
+
+    def test_count_diff_uses_server_side_count(self):
+        client = MagicMock()
+        client.execute_query.side_effect = [[{"cnt": 7}], [{"cnt": 3}]]
+        svc = IncrementalBuildService(client)
+        add_n, rm_n = svc.count_diff("view", "snap")
+        assert (add_n, rm_n) == (7, 3)
+        # Both calls must be aggregate COUNT(*) wrapping the EXCEPT subquery.
+        sqls = [c[0][0] for c in client.execute_query.call_args_list]
+        assert all("COUNT(*)" in s and "EXCEPT" in s for s in sqls)
+
+    def test_iter_added_streams_via_iter_rows(self):
+        client = MagicMock()
+        added = [
+            {"subject": "s1", "predicate": "p", "object": "o1"},
+            {"subject": "s2", "predicate": "p", "object": "o2"},
+        ]
+        client.iter_rows.return_value = iter(added)
+        svc = IncrementalBuildService(client)
+        out = list(svc.iter_added("view", "snap", batch_size=1234))
+        assert out == added
+        called_sql = client.iter_rows.call_args[0][0]
+        assert "FROM view" in called_sql
+        assert "EXCEPT" in called_sql
+        assert "FROM snap" in called_sql
+        assert client.iter_rows.call_args.kwargs["batch_size"] == 1234
+
+    def test_iter_removed_streams_via_iter_rows(self):
+        client = MagicMock()
+        removed = [{"subject": "s9", "predicate": "p", "object": "o9"}]
+        client.iter_rows.return_value = iter(removed)
+        svc = IncrementalBuildService(client)
+        out = list(svc.iter_removed("view", "snap"))
+        assert out == removed
+        called_sql = client.iter_rows.call_args[0][0]
+        # Removed = snapshot \\ view, so snapshot is on the left of EXCEPT.
+        left, _, right = called_sql.partition("EXCEPT")
+        assert "FROM snap" in left
+        assert "FROM view" in right
+
+    def test_iter_added_requires_streaming_client(self):
+        client = MagicMock(spec=["execute_query"])  # no iter_rows
+        svc = IncrementalBuildService(client)
+        with pytest.raises(InfrastructureError, match="iter_rows"):
+            list(svc.iter_added("view", "snap"))

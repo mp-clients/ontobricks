@@ -7,9 +7,8 @@ the active :class:`back.objects.registry.store.RegistryStore`:
 - Volume backend → ``.global_config.json`` on the UC Volume.
 - Lakebase backend → ``global_config`` row on Postgres.
 
-Admins (CAN MANAGE) control **warehouse_id** (SQL warehouse for UC),
-**default_base_uri**, **default_emoji**, the registry ``backend``, and
-the Lakebase ``schema`` name.
+Includes **graph_engine** / **graph_engine_config** with warehouse_id,
+default_base_uri, registry ``backend``, Lakebase ``schema`` name, etc.
 
 In local (non-App) mode the same persistence applies when a registry
 exists; env vars and fallbacks cover bootstrap and unconfigured
@@ -265,7 +264,7 @@ class GlobalConfigService:
         """Persist the navbar logo as a ``data:`` URL (empty string clears it)."""
         return self._save(host, token, registry_cfg, {"navbar_logo": data_url or ""})
 
-    ALLOWED_GRAPH_ENGINES = ("ladybug",)
+    ALLOWED_GRAPH_ENGINES = ("ladybug", "lakebase")
 
     def get_graph_engine(
         self, host: str, token: str, registry_cfg: Dict[str, str]
@@ -308,6 +307,11 @@ class GlobalConfigService:
         """Persist the engine-specific configuration dict."""
         if not isinstance(config, dict):
             return False, "graph_engine_config must be a JSON object"
+        from back.core.graphdb.lakebase.LakebaseBase import validate_engine_config_keys
+
+        ok_keys, msg_keys = validate_engine_config_keys(config)
+        if not ok_keys:
+            return False, msg_keys
         return self._save(host, token, registry_cfg, {"graph_engine_config": config})
 
     def get_registry_cache_ttl(

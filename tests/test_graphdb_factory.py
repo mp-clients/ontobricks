@@ -92,8 +92,61 @@ class TestGraphDBFactory:
             _, kwargs = mock.call_args
             assert kwargs["engine_config"] == {"key": "val"}
 
+    def test_lakebase_engine_dispatches(self):
+        factory = GraphDBFactory()
+        domain = MagicMock()
+        with patch.object(factory, "_create_lakebase", return_value=MagicMock()) as mock_lb:
+            factory.create(domain, engine="lakebase")
+            mock_lb.assert_called_once()
+
+    def test_lakebase_unavailable_returns_none(self):
+        factory = GraphDBFactory()
+        domain = MagicMock()
+        with patch("back.core.graphdb.lakebase.LAKEBASE_AVAILABLE", False):
+            assert factory.create(domain, engine="lakebase") is None
+
     def test_get_graphdb_convenience(self):
         with patch.object(GraphDBFactory, "create", return_value=MagicMock()) as mock_create:
             domain = MagicMock()
             GraphDBFactory.get_graphdb(domain, engine="ladybug")
             mock_create.assert_called_once()
+
+    def test_lakebase_schema_follows_registry_volume_schema(self):
+        from types import SimpleNamespace
+
+        factory = GraphDBFactory()
+        domain = SimpleNamespace(settings={"registry": {}}, info={"name": "Dom"})
+        settings = SimpleNamespace(
+            registry_catalog="",
+            registry_schema="",
+            registry_volume="",
+            registry_backend="volume",
+            lakebase_schema="ontobricks_registry",
+            lakebase_database="",
+            registry_volume_path="",
+        )
+        mock_auth = MagicMock(is_available=True, instance_name="inst", database="ldb")
+        with (
+            patch("back.core.graphdb.lakebase.LAKEBASE_AVAILABLE", True),
+            patch("back.core.databricks.get_lakebase_auth", return_value=mock_auth),
+            patch(
+                "back.objects.registry.RegistryCfg.from_domain",
+                return_value=MagicMock(
+                    catalog="team_cat",
+                    schema="registry_uc_schema",
+                    volume="vol",
+                    backend="volume",
+                ),
+            ),
+            patch(
+                "back.core.graphdb.lakebase.LakebaseFlatStore.LakebaseFlatStore",
+            ) as mock_lb,
+        ):
+            mock_lb.return_value = MagicMock()
+            factory.create(
+                domain,
+                settings,
+                engine="lakebase",
+                engine_config={"schema": "ontobricks_graph"},
+            )
+        assert mock_lb.call_args.kwargs["schema"] == "registry_uc_schema"

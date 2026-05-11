@@ -98,6 +98,18 @@ class TripleStoreBackend(ABC):
         """Escape single quotes for SQL string literals."""
         return _shared_sql_escape(value)
 
+    def _sql_relation(self, table_name: str) -> str:
+        """SQL relation fragment for *table_name* in generated queries.
+
+        Delta passes fully-qualified ``catalog.schema.table`` unchanged.
+        Postgres backends resolve to a physical identifier under ``search_path``.
+        """
+        return table_name
+
+    def sql_table_reference(self, graph_name: str) -> str:
+        """Stable identifier for translators (SWRL, SPARQL, aggregate/DT SQL)."""
+        return self._sql_relation(graph_name)
+
     def get_aggregate_stats(self, table_name: str) -> Dict[str, int]:
         """Return aggregate triple-store statistics in a single query.
 
@@ -111,7 +123,7 @@ class TripleStoreBackend(ABC):
             f"COUNT(DISTINCT predicate) AS distinct_predicates, "
             f"SUM(CASE WHEN predicate = '{RDF_TYPE}' THEN 1 ELSE 0 END) AS type_assertion_count, "
             f"SUM(CASE WHEN predicate = '{RDFS_LABEL}' THEN 1 ELSE 0 END) AS label_count "
-            f"FROM {table_name}"
+            f"FROM {self._sql_relation(table_name)}"
         )
         rows = self.execute_query(sql)
         row = rows[0] if rows else {}
@@ -126,7 +138,7 @@ class TripleStoreBackend(ABC):
     def get_type_distribution(self, table_name: str) -> List[Dict[str, Any]]:
         """Return count per ``rdf:type`` value, ordered descending."""
         sql = (
-            f"SELECT object AS type_uri, COUNT(*) AS cnt FROM {table_name} "
+            f"SELECT object AS type_uri, COUNT(*) AS cnt FROM {self._sql_relation(table_name)} "
             f"WHERE predicate = '{RDF_TYPE}' GROUP BY object ORDER BY cnt DESC"
         )
         return self.execute_query(sql) or []
@@ -134,7 +146,7 @@ class TripleStoreBackend(ABC):
     def get_predicate_distribution(self, table_name: str) -> List[Dict[str, Any]]:
         """Return count per predicate URI, ordered descending."""
         sql = (
-            f"SELECT predicate, COUNT(*) AS cnt FROM {table_name} "
+            f"SELECT predicate, COUNT(*) AS cnt FROM {self._sql_relation(table_name)} "
             f"GROUP BY predicate ORDER BY cnt DESC"
         )
         return self.execute_query(sql) or []
@@ -161,12 +173,12 @@ class TripleStoreBackend(ABC):
             esc = self._sql_escape(search).lower()
             conditions.append(
                 f"subject IN ("
-                f"SELECT DISTINCT subject FROM {table_name} "
+                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
                 f"WHERE predicate != '{RDF_TYPE}' "
                 f"AND LOWER(object) LIKE '%{esc}%')"
             )
         sql = (
-            f"SELECT DISTINCT subject FROM {table_name} "
+            f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
             f"WHERE {' AND '.join(conditions)} "
             f"ORDER BY subject "
             f"LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -181,7 +193,7 @@ class TripleStoreBackend(ABC):
         esc_type = self._sql_escape(type_uri)
         esc_id = self._sql_escape(id_fragment)
         sql = (
-            f"SELECT DISTINCT subject FROM {table_name} "
+            f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
             f"WHERE predicate = '{RDF_TYPE}' "
             f"AND object = '{esc_type}' "
             f"AND (subject LIKE '%/{esc_id}' OR subject LIKE '%#{esc_id}')"
@@ -202,11 +214,11 @@ class TripleStoreBackend(ABC):
         in_clause = ", ".join(f"'{self._sql_escape(u)}'" for u in subjects)
 
         type_sql = (
-            f"SELECT subject, object FROM {table_name} "
+            f"SELECT subject, object FROM {self._sql_relation(table_name)} "
             f"WHERE predicate = '{RDF_TYPE}' AND subject IN ({in_clause})"
         )
         label_sql = (
-            f"SELECT subject, object FROM {table_name} "
+            f"SELECT subject, object FROM {self._sql_relation(table_name)} "
             f"WHERE predicate = '{RDFS_LABEL}' AND subject IN ({in_clause})"
         )
 
@@ -234,7 +246,7 @@ class TripleStoreBackend(ABC):
             return []
         in_clause = ", ".join(f"'{self._sql_escape(u)}'" for u in subjects)
         sql = (
-            f"SELECT subject, predicate, object FROM {table_name} "
+            f"SELECT subject, predicate, object FROM {self._sql_relation(table_name)} "
             f"WHERE subject IN ({in_clause})"
         )
         return self.execute_query(sql)
@@ -243,9 +255,9 @@ class TripleStoreBackend(ABC):
         """Return distinct predicates used by instances of *type_uri*."""
         esc_type = self._sql_escape(type_uri)
         sql = (
-            f"SELECT DISTINCT predicate FROM {table_name} "
+            f"SELECT DISTINCT predicate FROM {self._sql_relation(table_name)} "
             f"WHERE subject IN ("
-            f"  SELECT subject FROM {table_name} "
+            f"  SELECT subject FROM {self._sql_relation(table_name)} "
             f"  WHERE predicate = '{RDF_TYPE}' "
             f"  AND object = '{esc_type}' LIMIT 1"
             f")"
@@ -264,14 +276,14 @@ class TripleStoreBackend(ABC):
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
         sql = (
             f"SELECT subject, predicate, object "
-            f"FROM {table_name}{where} LIMIT {limit} OFFSET {offset}"
+            f"FROM {self._sql_relation(table_name)}{where} LIMIT {limit} OFFSET {offset}"
         )
         return self.execute_query(sql)
 
     def paginated_count(self, table_name: str, conditions: List[str]) -> int:
         """Return count of triples matching *conditions*."""
         where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
-        sql = f"SELECT COUNT(*) AS cnt FROM {table_name}{where}"
+        sql = f"SELECT COUNT(*) AS cnt FROM {self._sql_relation(table_name)}{where}"
         rows = self.execute_query(sql)
         return int(rows[0]["cnt"]) if rows else 0
 
@@ -302,7 +314,7 @@ class TripleStoreBackend(ABC):
         )
         sql = (
             f"WITH RECURSIVE seeds AS (\n"
-            f"  SELECT DISTINCT subject AS entity FROM {table_name}{seed_where}\n"
+            f"  SELECT DISTINCT subject AS entity FROM {self._sql_relation(table_name)}{seed_where}\n"
             f"), bfs(entity, lvl) AS (\n"
             f"  SELECT entity, 0 FROM seeds\n"
             f"  UNION ALL\n"
@@ -310,7 +322,7 @@ class TripleStoreBackend(ABC):
             f"    CASE WHEN t.subject = b.entity THEN t.object ELSE t.subject END,\n"
             f"    b.lvl + 1\n"
             f"  FROM bfs b\n"
-            f"  JOIN {table_name} t ON (t.subject = b.entity OR t.object = b.entity)\n"
+            f"  JOIN {self._sql_relation(table_name)} t ON (t.subject = b.entity OR t.object = b.entity)\n"
             f"  WHERE b.lvl < {depth} AND {edge_filters}\n"
             f")\n"
             f"SELECT entity, MIN(lvl) AS min_lvl FROM bfs GROUP BY entity"
@@ -349,34 +361,34 @@ class TripleStoreBackend(ABC):
             if field == "id":
                 like = _like("LOWER(subject)")
                 sql = (
-                    f"SELECT DISTINCT subject FROM {table_name} "
+                    f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
                     f"WHERE predicate = '{RDF_TYPE}' AND object = '{esc_type}' "
                     f"AND {like}"
                 )
             else:
                 like = _like("LOWER(object)")
                 sql = (
-                    f"SELECT DISTINCT subject FROM {table_name} "
+                    f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
                     f"WHERE predicate = '{RDF_TYPE}' AND object = '{esc_type}' "
                     f"AND subject IN ("
-                    f"SELECT subject FROM {table_name} "
+                    f"SELECT subject FROM {self._sql_relation(table_name)} "
                     f"WHERE predicate = '{RDFS_LABEL}' AND {like})"
                 )
         elif entity_type:
             sql = (
-                f"SELECT DISTINCT subject FROM {table_name} "
+                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
                 f"WHERE predicate = '{RDF_TYPE}' AND object = '{esc_type}'"
             )
         elif field == "id":
             like = _like("LOWER(subject)")
             sql = (
-                f"SELECT DISTINCT subject FROM {table_name} "
+                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
                 f"WHERE predicate = '{RDF_TYPE}' AND {like}"
             )
         else:
             like = _like("LOWER(object)")
             sql = (
-                f"SELECT DISTINCT subject FROM {table_name} "
+                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
                 f"WHERE predicate = '{RDFS_LABEL}' AND {like}"
             )
 
@@ -392,7 +404,7 @@ class TripleStoreBackend(ABC):
         like_clauses = " OR ".join(
             f"subject LIKE '{self._sql_escape(p)}'" for p in like_patterns
         )
-        sql = f"SELECT DISTINCT subject FROM {table_name} WHERE {like_clauses}"
+        sql = f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} WHERE {like_clauses}"
         rows = self.execute_query(sql)
         return {r["subject"] for r in rows}
 
@@ -422,19 +434,19 @@ class TripleStoreBackend(ABC):
         sql = (
             f"WITH RECURSIVE tc AS (\n"
             f"  SELECT subject, object, 1 AS depth\n"
-            f"  FROM {table_name}\n"
+            f"  FROM {self._sql_relation(table_name)}\n"
             f"  WHERE predicate = '{esc_pred}'{start_filter}\n"
             f"  UNION ALL\n"
             f"  SELECT tc.subject, t.object, tc.depth + 1\n"
             f"  FROM tc\n"
-            f"  JOIN {table_name} t\n"
+            f"  JOIN {self._sql_relation(table_name)} t\n"
             f"    ON tc.object = t.subject AND t.predicate = '{esc_pred}'\n"
             f"  WHERE tc.depth < {int(max_depth)}\n"
             f")\n"
             f"SELECT DISTINCT tc.subject, '{esc_pred}' AS predicate, tc.object\n"
             f"FROM tc\n"
             f"WHERE NOT EXISTS (\n"
-            f"  SELECT 1 FROM {table_name} ex\n"
+            f"  SELECT 1 FROM {self._sql_relation(table_name)} ex\n"
             f"  WHERE ex.subject = tc.subject\n"
             f"    AND ex.predicate = '{esc_pred}'\n"
             f"    AND ex.object = tc.object\n"
@@ -464,10 +476,10 @@ class TripleStoreBackend(ABC):
         esc_pred = self._sql_escape(predicate_uri)
         sql = (
             f"SELECT t.object AS subject, '{esc_pred}' AS predicate, t.subject AS object\n"
-            f"FROM {table_name} t\n"
+            f"FROM {self._sql_relation(table_name)} t\n"
             f"WHERE t.predicate = '{esc_pred}'\n"
             f"  AND NOT EXISTS (\n"
-            f"    SELECT 1 FROM {table_name} inv\n"
+            f"    SELECT 1 FROM {self._sql_relation(table_name)} inv\n"
             f"    WHERE inv.subject = t.object\n"
             f"      AND inv.predicate = '{esc_pred}'\n"
             f"      AND inv.object = t.subject\n"
@@ -524,7 +536,7 @@ class TripleStoreBackend(ABC):
         prefix_esc = self._sql_escape(cohort_uri_prefix)
         in_cohort_esc = self._sql_escape(in_cohort_predicate)
         sql = (
-            f"DELETE FROM {table_name} "
+            f"DELETE FROM {self._sql_relation(table_name)} "
             f"WHERE subject LIKE '{prefix_esc}%' "
             f"OR (predicate = '{in_cohort_esc}' "
             f"    AND object LIKE '{prefix_esc}%')"
@@ -554,18 +566,18 @@ class TripleStoreBackend(ABC):
         in_clause = ", ".join(f"'{self._sql_escape(e)}'" for e in entity_uris)
         sql = (
             f"SELECT DISTINCT e.entity FROM ("
-            f"  SELECT object AS entity FROM {table_name} "
+            f"  SELECT object AS entity FROM {self._sql_relation(table_name)} "
             f"  WHERE subject IN ({in_clause}) "
             f"  AND object LIKE 'http%' "
             f"  AND predicate != '{RDF_TYPE}' "
             f"  AND predicate != '{RDFS_LABEL}' "
             f"  UNION "
-            f"  SELECT subject AS entity FROM {table_name} "
+            f"  SELECT subject AS entity FROM {self._sql_relation(table_name)} "
             f"  WHERE object IN ({in_clause}) "
             f"  AND predicate != '{RDF_TYPE}' "
             f"  AND predicate != '{RDFS_LABEL}'"
             f") e "
-            f"INNER JOIN {table_name} t "
+            f"INNER JOIN {self._sql_relation(table_name)} t "
             f"ON t.subject = e.entity AND t.predicate = '{RDF_TYPE}'"
         )
         rows = self.execute_query(sql) or []

@@ -839,8 +839,20 @@ class DigitalTwin:
                 detail=str(e),
             ) from e
 
+    @staticmethod
+    def resolve_graph_engine(domain: Any, settings: Any) -> str:
+        """Return globally configured graph DB engine (``ladybug`` or ``lakebase``)."""
+        from back.core.triplestore.TripleStoreFactory import TripleStoreFactory
+
+        raw = TripleStoreFactory._resolve_graph_engine(domain, settings) or "ladybug"
+        return raw if raw in ("ladybug", "lakebase") else "ladybug"
+
     async def fetch_digital_twin_existence(self, settings) -> Dict[str, Any]:
-        """Live checks for SQL view, snapshot table, local/registry Ladybug archives."""
+        """Live checks for SQL view, snapshot table, and graph artefacts.
+
+        For LadybugDB: local ``.lbug`` path and registry archive on UC Volume.
+        For Lakebase: Postgres triple table existence/count (no Volume archive).
+        """
         import asyncio
         import os
 
@@ -860,6 +872,7 @@ class DigitalTwin:
         from back.core.graphdb.ladybugdb import graph_volume_path
 
         domain = self._domain
+        graph_engine = DigitalTwin.resolve_graph_engine(domain, settings)
         view_table = effective_view_table(domain)
         graph_name = effective_graph_name(domain)
         last_built = domain.last_build or None
@@ -875,14 +888,22 @@ class DigitalTwin:
         wh_id = resolve_warehouse_id(domain, settings)
 
         db_name = graph_name or DEFAULT_GRAPH_NAME
-        local_path = resolve_ladybug_local_path(domain, db_name)
-
         uc_path = effective_uc_version_path(domain)
-        registry_lbug_path = graph_volume_path(uc_path, db_name) if uc_path else ""
+
+        if graph_engine == "lakebase":
+            local_path = ""
+            registry_lbug_path = ""
+            ladybug_local_ready = False
+        else:
+            local_path = resolve_ladybug_local_path(domain, db_name)
+            registry_lbug_path = graph_volume_path(uc_path, db_name) if uc_path else ""
+            ladybug_local_ready = bool(last_built) and os.path.exists(local_path)
 
         result: Dict[str, Any] = {
             "view_exists": None,
-            "local_lbug_exists": bool(last_built) and os.path.exists(local_path),
+            "graph_engine": graph_engine,
+            "registry_archive_applicable": graph_engine != "lakebase",
+            "local_lbug_exists": ladybug_local_ready,
             "registry_lbug_exists": None,
             "view_table": view_table,
             "graph_name": graph_name,
@@ -895,6 +916,7 @@ class DigitalTwin:
             "view_check_error": None,
             "snapshot_check_error": None,
             "registry_check_error": None,
+            "triple_count": 0,
         }
 
         async def _check_view() -> tuple[Optional[bool], Optional[str]]:
@@ -940,6 +962,8 @@ class DigitalTwin:
                 return None, f"Snapshot check failed: {e}"
 
         async def _check_registry() -> tuple[Optional[bool], Optional[str]]:
+            if graph_engine == "lakebase":
+                return None, None
             if not uc_path:
                 return None, "Domain has no UC volume version path (uc_version_path/uc_domain_path)"
             if not registry_lbug_path:
@@ -986,6 +1010,36 @@ class DigitalTwin:
         result["snapshot_check_error"] = snap_err
         result["registry_lbug_exists"] = reg_ok
         result["registry_check_error"] = reg_err
+
+        if graph_engine == "lakebase":
+            graph_store = get_triplestore(domain, settings, backend="graph")
+            exists_tbl = False
+            cnt = 0
+            display = ""
+            if graph_store:
+                try:
+                    exists_tbl = await run_blocking(graph_store.table_exists, graph_name)
+                    if exists_tbl:
+                        gs = await run_blocking(graph_store.get_status, graph_name)
+                        cnt = int(gs.get("count", 0) or 0)
+                        dbpart = str(gs.get("database") or "").strip()
+                        schpart = str(gs.get("schema") or "").strip()
+                        tbl_fn = getattr(graph_store, "physical_table_id", None)
+                        tblpart = (
+                            tbl_fn(graph_name) if callable(tbl_fn) else graph_name
+                        )
+                        parts = [p for p in (dbpart, schpart, tblpart) if p]
+                        display = " · ".join(parts) if parts else tblpart
+                except Exception as e:
+                    logger.warning("DT existence: lakebase graph check failed: %s", e)
+            result["triple_count"] = cnt
+            result["local_lbug_exists"] = bool(exists_tbl and cnt > 0)
+            result["local_lbug_path"] = display or (
+                "Lakebase Postgres — graph table not created yet (run Build)"
+            )
+            result["registry_lbug_exists"] = None
+            result["registry_lbug_path"] = ""
+            result["registry_check_error"] = None
 
         return result
 
@@ -1988,12 +2042,15 @@ class DigitalTwin:
         if not swrl_rules:
             return
         from back.core.reasoning.SWRLEngine import SWRLEngine
+        from back.core.graphdb.GraphDBBackend import GraphDBBackend
 
         ontology = ontology or {}
         engine = SWRLEngine(ontology=ontology)
         translator = engine._get_translator(store, graph_name)
         base_uri = ontology.get("base_uri", "")
         uri_map = engine._build_uri_map()
+        uses_cypher = GraphDBBackend.is_cypher_backend(store)
+        tbl_sql = store.sql_table_reference(graph_name)
         shape_count = total - len(swrl_rules)
         if pop_cache is None:
             pop_cache = {}
@@ -2011,7 +2068,11 @@ class DigitalTwin:
                 "base_uri": base_uri,
                 "uri_map": uri_map,
             }
-            query = translator.build_violation_query(params)
+            query = (
+                translator.build_violation_query(params)
+                if uses_cypher
+                else translator.build_violation_sql(tbl_sql, params)
+            )
             if not query:
                 results.append(
                     {
@@ -2019,7 +2080,11 @@ class DigitalTwin:
                         "category": "structural",
                         "shape_id": f"swrl:{rule.get('name', idx)}",
                         "status": "info",
-                        "message": "Cannot translate to Cypher",
+                        "message": (
+                            "Cannot translate to Cypher"
+                            if uses_cypher
+                            else "Cannot translate to SQL"
+                        ),
                         "violations": [],
                         "sql": "",
                     }
@@ -2027,9 +2092,13 @@ class DigitalTwin:
                 continue
             try:
                 t_rule = time.time()
-                conn = store.get_connection()
-                rows = conn.execute(query)
-                violations = [{"s": str(row[0])} for row in rows]
+                if uses_cypher:
+                    conn = store.get_connection()
+                    rows = conn.execute(query)
+                    violations = [{"s": str(row[0])} for row in rows]
+                else:
+                    raw_rows = store.execute_query(query) or []
+                    violations = [{"s": str(r.get("s", ""))} for r in raw_rows]
                 violation_total = len(violations)
                 if violation_limit is not None and violation_total > violation_limit:
                     violations = violations[:violation_limit]
@@ -2102,11 +2171,14 @@ class DigitalTwin:
         if not decision_tables:
             return
         from back.core.reasoning.DecisionTableEngine import DecisionTableEngine
+        from back.core.graphdb.GraphDBBackend import GraphDBBackend
 
         engine = DecisionTableEngine()
         ontology = ontology or {}
         base_uri = ontology.get("base_uri", "")
         uri_map = engine._build_uri_map(ontology)
+        uses_cypher = GraphDBBackend.is_cypher_backend(store)
+        tbl_sql = store.sql_table_reference(graph_name)
         if pop_cache is None:
             pop_cache = {}
         for idx, dt in enumerate(decision_tables):
@@ -2118,7 +2190,11 @@ class DigitalTwin:
                 task.id, progress, f"DT {idx + 1}/{len(decision_tables)}: {dt_name}"
             )
             resolved = engine._resolve_dt(dt, uri_map, base_uri)
-            query = engine.build_violation_cypher(resolved, graph_name, base_uri, store)
+            query = (
+                engine.build_violation_cypher(resolved, graph_name, base_uri, store)
+                if uses_cypher
+                else engine.build_violation_sql(resolved, tbl_sql, base_uri)
+            )
             if not query:
                 results.append(
                     {
@@ -2126,7 +2202,11 @@ class DigitalTwin:
                         "category": "conformance",
                         "shape_id": f"dt:{dt.get('name', idx)}",
                         "status": "info",
-                        "message": "Cannot translate to Cypher",
+                        "message": (
+                            "Cannot translate to Cypher"
+                            if uses_cypher
+                            else "Cannot translate to SQL"
+                        ),
                         "violations": [],
                         "sql": "",
                     }
@@ -2134,9 +2214,13 @@ class DigitalTwin:
                 continue
             try:
                 t_rule = time.time()
-                conn = store.get_connection()
-                rows = conn.execute(query)
-                violations = [{"s": str(row[0])} for row in rows]
+                if uses_cypher:
+                    conn = store.get_connection()
+                    rows = conn.execute(query)
+                    violations = [{"s": str(row[0])} for row in rows]
+                else:
+                    raw_rows = store.execute_query(query) or []
+                    violations = [{"s": str(r.get("s", ""))} for r in raw_rows]
                 violation_total = len(violations)
                 if violation_limit is not None and violation_total > violation_limit:
                     violations = violations[:violation_limit]
@@ -2209,10 +2293,13 @@ class DigitalTwin:
         if not aggregate_rules:
             return
         from back.core.reasoning.AggregateRuleEngine import AggregateRuleEngine
+        from back.core.graphdb.GraphDBBackend import GraphDBBackend
 
         engine = AggregateRuleEngine()
         ontology = ontology or {}
         base_uri = ontology.get("base_uri", "")
+        uses_cypher = GraphDBBackend.is_cypher_backend(store)
+        tbl_sql = store.sql_table_reference(graph_name)
         if pop_cache is None:
             pop_cache = {}
         for idx, rule in enumerate(aggregate_rules):
@@ -2224,7 +2311,11 @@ class DigitalTwin:
                 task.id, progress, f"Agg {idx + 1}/{len(aggregate_rules)}: {agg_name}"
             )
             resolved = engine._resolve_rule(dict(rule), ontology)
-            query = engine.build_cypher(resolved, graph_name, base_uri, store)
+            query = (
+                engine.build_cypher(resolved, graph_name, base_uri, store)
+                if uses_cypher
+                else engine.build_sql(resolved, tbl_sql, base_uri)
+            )
             if not query:
                 results.append(
                     {
@@ -2232,7 +2323,11 @@ class DigitalTwin:
                         "category": "conformance",
                         "shape_id": f"agg:{rule.get('name', idx)}",
                         "status": "info",
-                        "message": "Cannot translate to Cypher",
+                        "message": (
+                            "Cannot translate to Cypher"
+                            if uses_cypher
+                            else "Cannot translate to SQL"
+                        ),
                         "violations": [],
                         "sql": "",
                     }
@@ -2240,12 +2335,22 @@ class DigitalTwin:
                 continue
             try:
                 t_rule = time.time()
-                conn = store.get_connection()
-                rows = conn.execute(query)
-                violations = [
-                    {"s": str(row[0]), "agg_val": str(row[1]) if len(row) > 1 else ""}
-                    for row in rows
-                ]
+                if uses_cypher:
+                    conn = store.get_connection()
+                    rows = conn.execute(query)
+                    violations = [
+                        {"s": str(row[0]), "agg_val": str(row[1]) if len(row) > 1 else ""}
+                        for row in rows
+                    ]
+                else:
+                    raw_rows = store.execute_query(query) or []
+                    violations = [
+                        {
+                            "s": str(r.get("s", "")),
+                            "agg_val": str(r.get("agg_val", "")),
+                        }
+                        for r in raw_rows
+                    ]
                 violation_total = len(violations)
                 if violation_limit is not None and violation_total > violation_limit:
                     violations = violations[:violation_limit]
@@ -2352,7 +2457,6 @@ class DigitalTwin:
         config_changed: bool = False,
         snapshot_version: str,
         build_kind: str = "session",
-        archive_to_registry: bool = True,
     ) -> None:
         """Execute Digital Twin build/sync in a worker thread (TaskManager progress).
 
@@ -2361,12 +2465,11 @@ class DigitalTwin:
             progress callbacks, session cache, volume archive, phase timings).
           * ``"api"`` — external REST build (matches legacy ``digitaltwin.dt_build``).
 
-        ``archive_to_registry`` (session only): when ``True`` (default), after the
-        graph is written locally the ``.lbug`` archive upload to the registry
-        Volume runs in a **background daemon thread** so ``complete_task`` is
-        not blocked by gzip + HTTP upload.  When ``False``, the archive step is
-        skipped entirely (local graph under ``/tmp/ontobricks`` is still up to
-        date).
+        For session builds backed by Ladybug, the ``.lbug`` archive upload to
+        the registry Volume runs in a **background daemon thread** so
+        ``complete_task`` is not blocked by gzip + HTTP upload. Lakebase
+        engines skip the archive step entirely (Postgres is the system of
+        record).
 
         Implementation lives in :class:`_BuildPipeline` (Replace Method with
         Method Object); this static method preserves the legacy call shape
@@ -2395,7 +2498,6 @@ class DigitalTwin:
             config_changed=config_changed,
             snapshot_version=snapshot_version,
             build_kind=build_kind,
-            archive_to_registry=archive_to_registry,
         ).run()
 
     @staticmethod
@@ -3009,7 +3111,12 @@ class DigitalTwin:
         count = (ts_status or {}).get("count", 0)
 
         view_exists = (dt_exist or {}).get("view_exists")
+        reg_applicable = (dt_exist or {}).get("registry_archive_applicable", True)
         archive_exists = (dt_exist or {}).get("registry_lbug_exists")
+        if reg_applicable:
+            archive_fail = archive_exists is not True
+        else:
+            archive_fail = False
 
         if graph_loaded and view_exists is not False:
             return {
@@ -3023,7 +3130,7 @@ class DigitalTwin:
             not domain.last_build
             and not graph_loaded
             and not view_exists
-            and not archive_exists
+            and archive_fail
         ):
             return {
                 "indicator": "red",

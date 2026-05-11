@@ -47,6 +47,59 @@ class TestGetTriplestore:
                 domain, None, engine="ladybug", engine_config={}
             )
 
+    def test_graph_backend_lakebase_engine(self):
+        domain = _mock_domain()
+        with (
+            patch("back.core.graphdb.get_graphdb") as mock_gdb,
+            patch.object(
+                TripleStoreFactory, "_resolve_graph_engine", return_value="lakebase"
+            ),
+            patch.object(
+                TripleStoreFactory,
+                "_resolve_graph_engine_config",
+                return_value={"database": "db1", "schema": "g"},
+            ),
+        ):
+            mock_gdb.return_value = MagicMock()
+            result = get_triplestore(domain)
+            mock_gdb.assert_called_once_with(
+                domain,
+                None,
+                engine="lakebase",
+                engine_config={"database": "db1", "schema": "g"},
+            )
+            assert result is not None
+
+    def test_registry_mirror_lakebase_overrides_global_ladybug(self):
+        """POST /dtwin/sync/filter must use Lakebase when UI mirror says lakebase."""
+        domain = _mock_domain()
+        domain.settings = {
+            "registry": {
+                "graph_engine": "lakebase",
+                "graph_engine_config": {"schema": "custom_graph"},
+            }
+        }
+        with (
+            patch("back.core.graphdb.get_graphdb") as mock_gdb,
+            patch.object(
+                TripleStoreFactory,
+                "_read_global_config",
+                side_effect=[
+                    "ladybug",
+                    {},
+                ],
+            ),
+        ):
+            mock_gdb.return_value = MagicMock()
+            result = get_triplestore(domain)
+            mock_gdb.assert_called_once_with(
+                domain,
+                None,
+                engine="lakebase",
+                engine_config={"schema": "custom_graph"},
+            )
+            assert result is not None
+
     @patch.object(
         _triple_store_factory_mod,
         "get_databricks_host_and_token",

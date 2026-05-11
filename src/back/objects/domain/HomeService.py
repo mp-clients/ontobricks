@@ -368,6 +368,10 @@ class HomeService:
             "snapshot_table": dt_existence.get("snapshot_table", ""),
             "snapshot_exists": dt_existence.get("snapshot_exists"),
             "snapshot_check_error": dt_existence.get("snapshot_check_error"),
+            "graph_engine": dt_existence.get("graph_engine", "ladybug"),
+            "registry_archive_applicable": dt_existence.get(
+                "registry_archive_applicable", True
+            ),
             "last_built": last_build,
             "last_update": last_update,
             "has_data": ts_st.get("has_data", False),

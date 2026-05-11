@@ -204,6 +204,22 @@
                             <label class="form-label fw-semibold">
                                 <i class="bi bi-diagram-3 me-1"></i> Graph Database <small class="text-muted">(Graph DB)</small>
                             </label>
+
+                            {% if graph_engine == 'lakebase' %}
+                            <div class="alert alert-light border small mb-2 py-2">
+                                <strong><i class="bi bi-database me-1"></i>Lakebase (Postgres)</strong>
+                                <p class="mb-1 mt-2 small">
+                                    Graph triples are stored in the App-bound Lakebase Postgres instance.
+                                    The logical table name follows your domain and version
+                                    (<span id="graphLakebaseLogicalTable" class="font-monospace">{{ graph_name|default('', true) }}</span>).
+                                    Schema and database are configured under <em>Settings → Graph DB</em>.
+                                </p>
+                                <p class="mb-0 small text-muted">
+                                    There is no local <code>.lbug</code> file and no registry archive for the graph — Postgres is the source of truth.
+                                </p>
+                            </div>
+                            {% else %}
+                            <div id="ladybugGraphPathsBlock">
                             <div class="row g-2 mb-2">
                                 <div class="col-12">
                                     <label class="form-label small text-muted mb-1">Local file</label>
@@ -219,8 +235,10 @@
                                 </div>
                             </div>
                             <small class="text-muted">
-                                <i class="bi bi-info-circle me-1"></i>Graph data is automatically synced to the registry when saving or loading the domain.
+                                <i class="bi bi-info-circle me-1"></i>Graph data is automatically synced to the registry when saving or loading the domain (LadybugDB).
                             </small>
+                            </div>
+                            {% endif %}
                         </div>
                     </div>
 

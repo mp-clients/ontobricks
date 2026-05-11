@@ -1,9 +1,8 @@
 """Factory for creating graph database backends from domain session configuration.
 
-Supports multiple engine types (currently only ``"ladybug"``).  The *engine*
-parameter is the extension point for future graph DB engines (Neo4j,
-KuzuDB, etc.).  The *engine_config* parameter carries engine-specific
-JSON configuration set by the admin in Settings > Graph DB.
+Supports ``"ladybug"`` (embedded LadybugDB) and ``"lakebase"`` (flat triple
+tables on Lakebase Postgres).  The *engine_config* JSON is engine-specific
+(admin: Settings → Graph DB).
 """
 
 from typing import Any, Callable, Dict, Optional, Tuple
@@ -23,6 +22,7 @@ class GraphDBFactory:
     """Construct graph DB backend instances from domain session configuration."""
 
     LADYBUG_AVAILABLE = False
+    LAKEBASE_AVAILABLE = False
 
     def create(
         self,
@@ -36,8 +36,7 @@ class GraphDBFactory:
         Args:
             domain: Domain session with info and databricks config.
             settings: Optional application settings.
-            engine: ``"ladybug"`` (default).  Future values: ``"neo4j"``,
-                     ``"kuzu"``, etc.
+            engine: ``"ladybug"`` (default) or ``"lakebase"``.
             engine_config: Engine-specific JSON configuration set by the
                            admin in Settings > Graph DB.
 
@@ -51,6 +50,9 @@ class GraphDBFactory:
 
         if engine == "ladybug":
             return self._create_ladybug(domain, settings, engine_config=engine_config)
+
+        if engine == "lakebase":
+            return self._create_lakebase(domain, settings, engine_config=engine_config)
 
         logger.warning("Unknown graph DB engine: %s", engine)
         return None
@@ -145,6 +147,126 @@ class GraphDBFactory:
             logger.exception("Failed to create LadybugDB store: %s", e)
             return None
 
+    def _create_lakebase(
+        self,
+        domain: Any,
+        settings: Optional[Any] = None,
+        *,
+        engine_config: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Any]:
+        """Instantiate :class:`LakebaseFlatStore` on the bound Lakebase instance."""
+        try:
+            from back.core.graphdb.lakebase import LAKEBASE_AVAILABLE
+            from back.core.graphdb.lakebase.LakebaseBase import (
+                DEFAULT_GRAPH_SCHEMA,
+            )
+            from back.core.graphdb.lakebase.LakebaseFlatStore import (
+                LakebaseFlatStore,
+                SYNC_MODE_APP,
+                SYNC_MODE_MANAGED,
+                resolve_lakebase_graph_schema,
+            )
+            from back.core.graphdb.lakebase.SyncedTableManager import (
+                DEFAULT_TIMEOUT_S as _SYNC_DEFAULT_TIMEOUT_S,
+            )
+            from back.core.databricks import get_lakebase_auth
+        except ImportError as e:
+            logger.warning("Lakebase graph engine requires psycopg: %s", e)
+            return None
+
+        if not LAKEBASE_AVAILABLE:
+            logger.warning("Lakebase graph backend unavailable (psycopg not installed)")
+            return None
+
+        cfg = engine_config or {}
+        schema_raw = cfg.get("schema") or DEFAULT_GRAPH_SCHEMA
+        database_override = str(cfg.get("database") or "").strip()
+        sync_mode = str(cfg.get("sync_mode") or SYNC_MODE_APP).strip() or SYNC_MODE_APP
+        if sync_mode not in (SYNC_MODE_APP, SYNC_MODE_MANAGED):
+            logger.warning(
+                "Unknown sync_mode %r in graph_engine_config — falling back to %s",
+                sync_mode,
+                SYNC_MODE_APP,
+            )
+            sync_mode = SYNC_MODE_APP
+        sync_table_mode = str(cfg.get("sync_table_mode") or "snapshot").strip() or "snapshot"
+        sync_timeout_s = int(cfg.get("sync_timeout_s") or _SYNC_DEFAULT_TIMEOUT_S)
+        sync_uc_catalog = str(cfg.get("sync_uc_catalog") or "").strip()
+
+        try:
+            schema = resolve_lakebase_graph_schema(domain, settings, str(schema_raw))
+        except ValueError as exc:
+            logger.warning("Invalid lakebase graph schema: %s", exc)
+            return None
+
+        try:
+            auth = get_lakebase_auth()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Lakebase auth unavailable for graph engine: %s", exc)
+            return None
+
+        if not getattr(auth, "is_available", False):
+            logger.warning(
+                "Lakebase graph engine selected but PGHOST/PGUSER are not configured"
+            )
+            return None
+
+        synced_manager = None
+        if sync_mode == SYNC_MODE_MANAGED:
+            synced_manager = self._build_synced_manager(
+                auth, database_override
+            )
+            if synced_manager is None:
+                logger.warning(
+                    "managed_synced requested but SyncedTableManager could not be built — "
+                    "falling back to app_managed for this store"
+                )
+                sync_mode = SYNC_MODE_APP
+
+        try:
+            return LakebaseFlatStore(
+                auth,
+                schema=schema,
+                database_override=database_override,
+                sync_mode=sync_mode,
+                sync_table_mode=sync_table_mode,
+                sync_timeout_s=sync_timeout_s,
+                sync_uc_catalog=sync_uc_catalog,
+                synced_manager=synced_manager,
+            )
+        except Exception as e:
+            logger.exception("Failed to create Lakebase graph store: %s", e)
+            return None
+
+    @staticmethod
+    def _build_synced_manager(auth: Any, database_override: str) -> Optional[Any]:
+        """Resolve Lakebase project_id + logical DB name and build a SyncedTableManager.
+
+        Returns *None* if either piece is missing -- callers should fall back
+        to ``app_managed`` and surface a warning rather than aborting the
+        store construction.
+        """
+        try:
+            from back.core.graphdb.lakebase.SyncedTableManager import (
+                SyncedTableManager,
+            )
+
+            instance_name = auth.instance_name  # raises ValidationError on miss
+            logical_db = (database_override or auth.database or "").strip()
+            if not instance_name or not logical_db:
+                return None
+            return SyncedTableManager(
+                database_instance_name=instance_name,
+                logical_database_name=logical_db,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not build SyncedTableManager (%s) — managed_synced disabled "
+                "for this store",
+                exc,
+            )
+            return None
+
     @classmethod
     def get_graphdb(
         cls,
@@ -183,3 +305,10 @@ try:
     GraphDBFactory.LADYBUG_AVAILABLE = True
 except ImportError:
     logger.debug("LadybugDB backends not available (optional dependency)")
+
+try:
+    from back.core.graphdb.lakebase import LAKEBASE_AVAILABLE as _LB_AVAIL  # noqa: F401
+
+    GraphDBFactory.LAKEBASE_AVAILABLE = bool(_LB_AVAIL)
+except ImportError:
+    logger.debug("Lakebase graph backends not available (optional dependency)")

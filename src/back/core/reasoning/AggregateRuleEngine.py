@@ -144,7 +144,7 @@ class AggregateRuleEngine:
         if is_cypher:
             query = self.build_cypher(rule, table_name, base_uri, store)
         else:
-            query = self.build_sql(rule, table_name, base_uri)
+            query = self.build_sql(rule, store.sql_table_reference(table_name), base_uri)
 
         if not query:
             return result

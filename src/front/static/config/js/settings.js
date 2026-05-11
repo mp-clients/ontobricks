@@ -1,6 +1,6 @@
 /**
  * OntoBricks - settings.js
- * Settings page JavaScript – tabbed layout with a single global Save button
+ * Settings page JavaScript – tabbed layout; global Save persists all sections including Graph DB
  */
 
 document.addEventListener('DOMContentLoaded', function () {
@@ -368,125 +368,410 @@ document.addEventListener('DOMContentLoaded', function () {
     //  LADYBUGDB TAB – Graph Engine selector
     // =====================================================================
 
-    let graphEngineLoaded = false;
-
-    async function loadGraphEngine() {
-        try {
-            const resp = await fetch('/settings/graph-engine', { credentials: 'same-origin' });
-            const data = await resp.json();
-            if (data.success) {
-                const sel = document.getElementById('graphEngineSelect');
-                if (sel && data.graph_engine) sel.value = data.graph_engine;
-            }
-            graphEngineLoaded = true;
-        } catch (e) {
-            console.log('Using default graph engine');
+    /** Show Lakebase picker vs Ladybug local-files section from graph engine select. */
+    function applyGraphDbEnginePanels() {
+        const sel = document.getElementById('graphEngineSelect');
+        const lakePanel = document.getElementById('lakebaseGraphPanel');
+        const ladybugFilesWrap = document.getElementById('ladybugLocalFilesWrap');
+        if (!sel) return;
+        const eng = sel.value;
+        if (lakePanel) {
+            lakePanel.style.display = eng === 'lakebase' ? 'block' : 'none';
+        }
+        if (ladybugFilesWrap) {
+            ladybugFilesWrap.style.display = eng === 'ladybug' ? '' : 'none';
         }
     }
 
-    document.getElementById('btnSaveGraphEngine')?.addEventListener('click', async function () {
-        const btn = this;
-        const sel = document.getElementById('graphEngineSelect');
+    async function loadLakebaseGraphDatabasesForGraphEngine() {
+        const sel = document.getElementById('lakebaseGraphDb');
+        const help = document.getElementById('lakebaseGraphDbHelp');
+        const ta = document.getElementById('graphEngineConfig');
         if (!sel) return;
+        sel.disabled = true;
+        sel.innerHTML = '<option value="">Loading databases…</option>';
+        let cfgDb = '';
+        try {
+            const o = JSON.parse(ta?.value || '{}');
+            if (o && typeof o.database === 'string') cfgDb = o.database;
+        } catch (_) { /* ignore */ }
+        try {
+            const resp = await fetch('/settings/registry/lakebase-databases', { credentials: 'same-origin' });
+            const data = await resp.json();
+            if (!data.success) {
+                sel.innerHTML = '<option value="">(default — use bound database)</option>';
+                if (help) help.innerHTML = '<i class="bi bi-exclamation-triangle text-warning me-1"></i>'
+                    + escapeHtmlSettings(data.message || 'Could not list databases.');
+                if (cfgDb) {
+                    const opt = document.createElement('option');
+                    opt.value = cfgDb;
+                    opt.textContent = cfgDb + ' (configured)';
+                    opt.selected = true;
+                    sel.appendChild(opt);
+                }
+                sel.disabled = false;
+                return;
+            }
+            const bound = data.bound_database || '';
+            const dbs = Array.isArray(data.databases) ? data.databases : [];
+            sel.innerHTML = '';
+            const defOpt = document.createElement('option');
+            defOpt.value = '';
+            defOpt.textContent = '(default — bound database' + (bound ? ': ' + bound : '') + ')';
+            sel.appendChild(defOpt);
+            for (const db of dbs) {
+                const opt = document.createElement('option');
+                opt.value = db.name;
+                let label = db.name;
+                if (db.is_bound) label += ' (bound)';
+                if (!db.connectable) label += ' — no CONNECT';
+                opt.textContent = label;
+                if (!db.connectable) opt.disabled = true;
+                if (db.name === cfgDb) opt.selected = true;
+                sel.appendChild(opt);
+            }
+            if (!cfgDb) defOpt.selected = true;
+            sel.disabled = false;
+            if (help) help.innerHTML = 'Same discovery API as Registry → Lakebase database picker.';
+        } catch (e) {
+            sel.innerHTML = '<option value="">(default)</option>';
+            sel.disabled = false;
+            if (help) help.innerHTML = '<i class="bi bi-x-circle text-danger me-1"></i>'
+                + escapeHtmlSettings(e.message || 'Network error');
+        }
+    }
 
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
+    /** Merge Lakebase form fields + optional managed-sync options into the JSON textarea. */
+    function mergeLakebasePanelIntoConfigTextarea() {
+        const ta = document.getElementById('graphEngineConfig');
+        const dbSel = document.getElementById('lakebaseGraphDb');
+        const schIn = document.getElementById('lakebaseGraphSchema');
+        const syncModeEl = document.getElementById('lakebaseSyncMode');
+        if (!ta || !dbSel || !schIn) return;
+        let o = {};
+        try { o = JSON.parse(ta.value || '{}'); } catch (_) { o = {}; }
+        if (typeof o !== 'object' || Array.isArray(o)) o = {};
+        o.database = dbSel.value || '';
+        o.schema = (schIn.value || 'ontobricks_graph').trim() || 'ontobricks_graph';
+        const mode = (syncModeEl && syncModeEl.value === 'managed_synced') ? 'managed_synced' : 'app_managed';
+        if (mode === 'managed_synced') {
+            o.sync_mode = 'managed_synced';
+            const stEl = document.getElementById('lakebaseSyncTableMode');
+            const toutEl = document.getElementById('lakebaseSyncTimeout');
+            const ucEl = document.getElementById('lakebaseUcCatalog');
+            if (stEl) o.sync_table_mode = stEl.value || 'snapshot';
+            if (toutEl) {
+                var n = parseInt(toutEl.value, 10);
+                o.sync_timeout_s = (!isNaN(n) && n > 0) ? n : 600;
+            }
+            if (ucEl) {
+                var cat = (ucEl.value || '').trim();
+                if (cat) o.sync_uc_catalog = cat;
+                else delete o.sync_uc_catalog;
+            }
+        } else {
+            o.sync_mode = 'app_managed';
+            delete o.sync_table_mode;
+            delete o.sync_timeout_s;
+            delete o.sync_uc_catalog;
+        }
+        ta.value = JSON.stringify(o, null, 2);
+    }
+
+    function toggleLakebaseManagedSyncPanel() {
+        const sm = document.getElementById('lakebaseSyncMode');
+        const panel = document.getElementById('lakebaseManagedSyncPanel');
+        if (!sm || !panel) return;
+        panel.classList.toggle('d-none', sm.value !== 'managed_synced');
+    }
+
+    function updateLakebaseSyncModeHelp() {
+        const sm = document.getElementById('lakebaseSyncMode');
+        const v = sm && sm.value === 'managed_synced' ? 'managed_synced' : 'app_managed';
+        document.querySelectorAll('[data-lk-mode]').forEach(function (el) {
+            el.classList.toggle('d-none', el.getAttribute('data-lk-mode') !== v);
+        });
+    }
+
+    async function loadUcCatalogsForGraphEngine() {
+        const dl = document.getElementById('lakebaseUcCatalogDatalist');
+        const msg = document.getElementById('lakebaseUcCatalogLoadMsg');
+        const btn = document.getElementById('btnLoadUcCatalogs');
+        if (!dl) return;
+        if (msg) {
+            msg.classList.remove('d-none');
+            msg.className = 'form-text small mt-1 text-muted';
+            msg.textContent = 'Loading catalogs…';
+        }
+        if (btn) btn.disabled = true;
+        try {
+            const resp = await fetch('/settings/graph-engine/uc-catalogs', { credentials: 'same-origin' });
+            const data = resp.ok ? await resp.json() : {};
+            dl.innerHTML = '';
+            if (data.success && Array.isArray(data.catalogs)) {
+                data.catalogs.forEach(function (name) {
+                    const opt = document.createElement('option');
+                    opt.value = name;
+                    dl.appendChild(opt);
+                });
+                if (msg) {
+                    msg.className = 'form-text small mt-1 text-success';
+                    msg.textContent = 'Loaded ' + data.catalogs.length + ' catalog(s). Type or pick a value above.';
+                }
+            } else {
+                if (msg) {
+                    msg.className = 'form-text small mt-1 text-warning';
+                    msg.textContent = data.message || 'Could not list catalogs — type the catalog name manually.';
+                }
+            }
+        } catch (e) {
+            if (msg) {
+                msg.className = 'form-text small mt-1 text-warning';
+                msg.textContent = e.message || 'Network error';
+            }
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    function applyLakebaseFormFromConfigTextarea() {
+        const ta = document.getElementById('graphEngineConfig');
+        const schIn = document.getElementById('lakebaseGraphSchema');
+        const syncModeEl = document.getElementById('lakebaseSyncMode');
+        if (!ta || !schIn) return;
+        try {
+            const o = JSON.parse(ta.value || '{}');
+            if (o && typeof o.schema === 'string' && o.schema.trim()) {
+                schIn.value = o.schema.trim();
+            }
+            if (syncModeEl) {
+                syncModeEl.value = (o.sync_mode === 'managed_synced') ? 'managed_synced' : 'app_managed';
+            }
+            const stEl = document.getElementById('lakebaseSyncTableMode');
+            if (stEl && o.sync_table_mode && typeof o.sync_table_mode === 'string') {
+                stEl.value = o.sync_table_mode;
+            }
+            const toutEl = document.getElementById('lakebaseSyncTimeout');
+            if (toutEl && o.sync_timeout_s != null) {
+                toutEl.value = String(parseInt(o.sync_timeout_s, 10) || 600);
+            }
+            const ucEl = document.getElementById('lakebaseUcCatalog');
+            if (ucEl && o.sync_uc_catalog != null) {
+                ucEl.value = String(o.sync_uc_catalog);
+            } else if (ucEl) {
+                ucEl.value = '';
+            }
+        } catch (_) { /* ignore */ }
+        toggleLakebaseManagedSyncPanel();
+        updateLakebaseSyncModeHelp();
+    }
+
+    async function loadLakebaseGraphHealth() {
+        const msgEl = document.getElementById('lakebaseGraphHealthMessage');
+        const dl = document.getElementById('lakebaseGraphHealthDl');
+        const btn = document.getElementById('btnRefreshLakebaseGraphHealth');
+        const engSel = document.getElementById('graphEngineSelect');
+        if (!msgEl || !dl || engSel?.value !== 'lakebase') return;
+
+        if (btn) btn.disabled = true;
+        dl.innerHTML = '';
+        msgEl.style.display = '';
+        msgEl.className = 'small mb-2 text-muted';
+        msgEl.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Checking Lakebase…';
+
+        function row(label, value) {
+            return '<dt class="col-sm-4 text-muted">' + escapeHtmlSettings(label) + '</dt>'
+                + '<dd class="col-sm-8 font-monospace text-break">' + value + '</dd>';
+        }
+
+        try {
+            const resp = await fetch('/settings/graph-engine/lakebase-health', { credentials: 'same-origin' });
+            const data = resp.ok ? await resp.json() : {};
+            if (!data.success) {
+                msgEl.className = 'small mb-2 text-warning';
+                const m = data.message || data.reason || 'Health check failed';
+                msgEl.innerHTML = '<i class="bi bi-exclamation-triangle me-1"></i>' + escapeHtmlSettings(m);
+                if (data.host) {
+                    dl.innerHTML = row('PGHOST', escapeHtmlSettings(String(data.host)));
+                }
+                return;
+            }
+            msgEl.className = 'small mb-2 ' + (data.schema_exists ? 'text-success' : 'text-warning');
+            msgEl.innerHTML = '<i class="bi bi-' + (data.schema_exists ? 'check-circle' : 'exclamation-triangle') + ' me-1"></i>'
+                + escapeHtmlSettings(data.message || 'OK');
+            dl.innerHTML = (
+                row('PGHOST', escapeHtmlSettings(String(data.host || '')))
+                + row('Port', escapeHtmlSettings(String(data.port != null ? data.port : '')))
+                + row('Bound PGDATABASE', escapeHtmlSettings(String(data.bound_database || '')))
+                + row('Effective database', escapeHtmlSettings(String(data.effective_database || '')))
+                + row('Graph schema', escapeHtmlSettings(String(data.graph_schema || '')))
+                + row('Schema exists', data.schema_exists ? 'yes' : 'no')
+                + row('Tables in schema', escapeHtmlSettings(String(data.tables_in_schema != null ? data.tables_in_schema : '')))
+            );
+        } catch (e) {
+            msgEl.className = 'small mb-2 text-danger';
+            msgEl.innerHTML = '<i class="bi bi-x-circle me-1"></i>' + escapeHtmlSettings(e.message || 'Network error');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    let ladybugFilesLoaded = false;
+
+    function setGraphDbTabLoading(loading) {
+        const banner = document.getElementById('graphDbTabLoadingBanner');
+        if (!banner) return;
+        banner.classList.toggle('d-none', !loading);
+        banner.classList.toggle('d-flex', loading);
+    }
+
+    /** Reload engine + JSON from server so the tab matches persisted settings after every visit. */
+    async function refreshGraphDbTabFromServer() {
+        const sel = document.getElementById('graphEngineSelect');
+        const ta = document.getElementById('graphEngineConfig');
+        if (!sel || !ta) return;
+        try {
+            const [engResp, cfgResp] = await Promise.all([
+                fetch('/settings/graph-engine', { credentials: 'same-origin' }),
+                fetch('/settings/graph-engine-config', { credentials: 'same-origin' }),
+            ]);
+            const engData = engResp.ok ? await engResp.json() : {};
+            const cfgData = cfgResp.ok ? await cfgResp.json() : {};
+            if (cfgData.success) {
+                ta.value = JSON.stringify(cfgData.graph_engine_config || {}, null, 2);
+            }
+            const rawEng = engData.graph_engine;
+            if (engData.success && rawEng && typeof rawEng === 'string') {
+                var allowed = Array.isArray(engData.allowed_engines) ? engData.allowed_engines : [];
+                if (allowed.length === 0 && (rawEng === 'ladybug' || rawEng === 'lakebase')) {
+                    sel.value = rawEng;
+                } else if (allowed.indexOf(rawEng) >= 0) {
+                    sel.value = rawEng;
+                } else {
+                    sel.value = 'ladybug';
+                }
+            }
+            applyLakebaseFormFromConfigTextarea();
+            if (sel.value === 'lakebase') {
+                await loadLakebaseGraphDatabasesForGraphEngine();
+                await loadLakebaseGraphHealth();
+            }
+        } catch (e) {
+            console.log('Graph DB tab refresh failed', e);
+        } finally {
+            applyGraphDbEnginePanels();
+        }
+    }
+
+    document.getElementById('graphEngineSelect')?.addEventListener('change', async function () {
+        applyGraphDbEnginePanels();
+        if (this.value === 'lakebase') {
+            applyLakebaseFormFromConfigTextarea();
+            await loadLakebaseGraphDatabasesForGraphEngine();
+            await loadLakebaseGraphHealth();
+        } else if (this.value === 'ladybug' && !ladybugFilesLoaded) {
+            loadLadybugFiles();
+        }
+    });
+
+    document.getElementById('lakebaseGraphDb')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseGraphSchema')?.addEventListener('input', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseGraphSchema')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseSyncMode')?.addEventListener('change', function () {
+        toggleLakebaseManagedSyncPanel();
+        updateLakebaseSyncModeHelp();
+        mergeLakebasePanelIntoConfigTextarea();
+    });
+    document.getElementById('lakebaseSyncTableMode')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseSyncTimeout')?.addEventListener('input', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseSyncTimeout')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseUcCatalog')?.addEventListener('input', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseUcCatalog')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('btnLoadUcCatalogs')?.addEventListener('click', () => loadUcCatalogsForGraphEngine());
+
+    document.getElementById('btnRefreshLakebaseGraphHealth')?.addEventListener('click', () => loadLakebaseGraphHealth());
+
+    /** Persist graph engine and JSON config (used by global Save). */
+    async function saveGraphDbSettings(errors) {
+        const sel = document.getElementById('graphEngineSelect');
+        const ta = document.getElementById('graphEngineConfig');
+        const errDiv = document.getElementById('graphEngineConfigError');
+        if (!sel || !ta) return;
+
+        if (errDiv) errDiv.style.display = 'none';
 
         try {
             const resp = await fetch('/settings/graph-engine', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
-                body: JSON.stringify({ graph_engine: sel.value })
+                body: JSON.stringify({ graph_engine: sel.value }),
             });
             const result = await resp.json();
-            if (result.success) {
-                showNotification('Graph DB engine saved', 'success', 2000);
-            } else {
-                showNotification('Error: ' + (result.message || 'Unknown error'), 'error');
+            if (!result.success) {
+                errors.push('Graph DB engine: ' + (result.message || 'Unknown error'));
+                return;
             }
-        } catch (e) {
-            showNotification('Error saving graph engine: ' + e.message, 'error');
-        }
 
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-check-circle me-1"></i> Save';
-    });
-
-    // =====================================================================
-    //  LADYBUGDB TAB – Graph Engine Config (JSON textarea)
-    // =====================================================================
-
-    let graphEngineConfigLoaded = false;
-
-    async function loadGraphEngineConfig() {
-        try {
-            const resp = await fetch('/settings/graph-engine-config', { credentials: 'same-origin' });
-            const data = await resp.json();
-            if (data.success) {
-                const ta = document.getElementById('graphEngineConfig');
-                if (ta) ta.value = JSON.stringify(data.graph_engine_config || {}, null, 2);
+            if (sel.value === 'lakebase') {
+                mergeLakebasePanelIntoConfigTextarea();
             }
-            graphEngineConfigLoaded = true;
-        } catch (e) {
-            console.log('Using default graph engine config');
-        }
-    }
 
-    document.getElementById('btnSaveGraphEngineConfig')?.addEventListener('click', async function () {
-        const btn = this;
-        const ta = document.getElementById('graphEngineConfig');
-        const errDiv = document.getElementById('graphEngineConfigError');
-        if (!ta) return;
+            let parsed;
+            try {
+                parsed = JSON.parse(ta.value || '{}');
+            } catch (parseErr) {
+                errors.push('Graph DB config: invalid JSON (' + parseErr.message + ')');
+                if (errDiv) {
+                    errDiv.textContent = 'Invalid JSON: ' + parseErr.message;
+                    errDiv.style.display = 'block';
+                }
+                return;
+            }
+            if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+                errors.push('Graph DB config: must be a JSON object');
+                if (errDiv) {
+                    errDiv.textContent = 'Configuration must be a JSON object (not an array or primitive)';
+                    errDiv.style.display = 'block';
+                }
+                return;
+            }
 
-        let parsed;
-        try {
-            parsed = JSON.parse(ta.value);
-        } catch (parseErr) {
-            if (errDiv) { errDiv.textContent = 'Invalid JSON: ' + parseErr.message; errDiv.style.display = 'block'; }
-            return;
-        }
-        if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-            if (errDiv) { errDiv.textContent = 'Configuration must be a JSON object (not an array or primitive)'; errDiv.style.display = 'block'; }
-            return;
-        }
-        if (errDiv) errDiv.style.display = 'none';
-
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Saving...';
-
-        try {
-            const resp = await fetch('/settings/graph-engine-config', {
+            const cfgResp = await fetch('/settings/graph-engine-config', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 credentials: 'same-origin',
-                body: JSON.stringify({ graph_engine_config: parsed })
+                body: JSON.stringify({ graph_engine_config: parsed }),
             });
-            const result = await resp.json();
-            if (result.success) {
-                ta.value = JSON.stringify(result.graph_engine_config || parsed, null, 2);
-                showNotification('Engine configuration saved', 'success', 2000);
-            } else {
-                showNotification('Error: ' + (result.message || 'Unknown error'), 'error');
+            const cfgJson = await cfgResp.json();
+            if (!cfgJson.success) {
+                errors.push('Graph DB config: ' + (cfgJson.message || 'Unknown error'));
+                return;
             }
+            ta.value = JSON.stringify(cfgJson.graph_engine_config || parsed, null, 2);
+            applyGraphDbEnginePanels();
+            if (sel.value === 'ladybug' && !ladybugFilesLoaded) loadLadybugFiles();
+            if (sel.value === 'lakebase') loadLakebaseGraphHealth();
         } catch (e) {
-            showNotification('Error saving engine config: ' + e.message, 'error');
+            errors.push('Graph DB: ' + e.message);
         }
-
-        btn.disabled = false;
-        btn.innerHTML = '<i class="bi bi-check-circle me-1"></i> Save';
-    });
+    }
 
     // =====================================================================
     //  LADYBUGDB TAB – Local files
     // =====================================================================
 
-    let ladybugFilesLoaded = false;
-
-    document.getElementById('tab-ladybugdb')?.addEventListener('shown.bs.tab', () => {
-        if (!graphEngineLoaded) loadGraphEngine();
-        if (!graphEngineConfigLoaded) loadGraphEngineConfig();
-        if (!ladybugFilesLoaded) loadLadybugFiles();
+    document.getElementById('tab-ladybugdb')?.addEventListener('shown.bs.tab', async () => {
+        setGraphDbTabLoading(true);
+        try {
+            await refreshGraphDbTabFromServer();
+            const sel = document.getElementById('graphEngineSelect');
+            if (sel && sel.value === 'ladybug' && !ladybugFilesLoaded) {
+                await loadLadybugFiles();
+            }
+        } finally {
+            setGraphDbTabLoading(false);
+        }
     });
 
     document.getElementById('btnRefreshLadybugFiles')?.addEventListener('click', () => loadLadybugFiles());
@@ -584,7 +869,7 @@ document.addEventListener('DOMContentLoaded', function () {
     }
 
     // =====================================================================
-    //  GLOBAL SAVE BUTTON – saves Warehouse + Global preferences
+    //  GLOBAL SAVE BUTTON – warehouse, global prefs, CloudFetch, Graph DB
     // =====================================================================
 
     document.getElementById('btnSaveAllSettings')?.addEventListener('click', async function () {
@@ -657,6 +942,9 @@ document.addEventListener('DOMContentLoaded', function () {
                 if (!r.success) errors.push('CloudFetch: ' + r.message);
             } catch (e) { errors.push('CloudFetch: ' + e.message); }
         }
+
+        // 5. Graph DB engine + JSON config (same tab; top Save only)
+        await saveGraphDbSettings(errors);
 
         btn.disabled = false;
         btn.innerHTML = '<i class="bi bi-check-circle me-1"></i> Save';

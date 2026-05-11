@@ -69,3 +69,9 @@ LadybugDB subpackage
    :members:
    :undoc-members:
    :show-inheritance:
+
+Lakebase (Postgres) subpackage
+------------------------------
+
+See :doc:`app.core.graphdb.lakebase` for ``back.core.graphdb.lakebase`` (flat triple
+tables on the App-bound Lakebase Postgres instance).

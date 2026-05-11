@@ -419,7 +419,12 @@ function refreshDtNamesFromForm() {
     }
 
     const localEl = document.getElementById('ladybugLocalPath');
-    if (localEl && safe) {
+    const cfg = window.__TRIPLESTORE_CONFIG || {};
+    const lbHint = document.getElementById('graphLakebaseLogicalTable');
+    if (lbHint && cfg.graph_engine === 'lakebase' && safe) {
+        lbHint.textContent = safe + '_V' + v;
+    }
+    if (localEl && safe && cfg.graph_engine !== 'lakebase') {
         localEl.textContent = '/tmp/ontobricks/' + safe + '_V' + v + '.lbug';
     }
 }

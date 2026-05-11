@@ -77,6 +77,36 @@ class SettingsService:
         return domain, host, token, registry_cfg
 
     @staticmethod
+    def _mirror_graph_engine_to_domain_registry(
+        session_mgr: SessionManager,
+        *,
+        engine: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Copy graph DB settings into ``domain.settings['registry']`` (best-effort).
+
+        Authoritative persistence is :class:`GlobalConfigService` via
+        :meth:`RegistryStore.save_global_config` (Volume ``.global_config.json``
+        or Lakebase ``global_config`` JSONB). Mirroring keeps the domain JSON
+        export aligned with the catalog/schema/volume block for operators.
+        """
+        if engine is None and config is None:
+            return
+        try:
+            domain = get_domain(session_mgr)
+            reg = domain.settings.setdefault("registry", {})
+            if engine is not None:
+                reg["graph_engine"] = engine
+            if config is not None:
+                reg["graph_engine_config"] = dict(config)
+            domain.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Could not mirror graph engine fields to domain.settings.registry: %s",
+                exc,
+            )
+
+    @staticmethod
     def require_admin_error(
         email: str,
         user_token: str,
@@ -344,7 +374,9 @@ class SettingsService:
 
         Includes the registry triplet (catalog/schema/volume), the
         active ``backend`` (``volume`` or ``lakebase``), the configured
-        ``lakebase_schema``, and a read-only ``lakebase`` block that
+        ``lakebase_schema``, **graph_engine** / **graph_engine_config**
+        read from the registry global-config blob (same persistence as
+        Settings → Graph DB), and a read-only ``lakebase`` block that
         surfaces the runtime-injected Postgres connection parameters
         (``PGHOST``/``PGPORT``/``PGDATABASE``/``PGUSER``) plus
         availability/health for the admin UI.
@@ -359,6 +391,26 @@ class SettingsService:
             except Exception:
                 logger.debug("Could not check registry marker")
 
+        graph_engine = "ladybug"
+        graph_engine_config: Dict[str, Any] = {}
+        if rcfg.is_configured:
+            try:
+                _, host, token, registry_cfg = SettingsService._resolve_context(
+                    session_mgr, settings
+                )
+                global_config_service.load(host, token, registry_cfg, force=True)
+                graph_engine = global_config_service.get_graph_engine(
+                    host, token, registry_cfg
+                )
+                graph_engine_config = global_config_service.get_graph_engine_config(
+                    host, token, registry_cfg
+                )
+            except Exception:
+                logger.debug(
+                    "Could not load graph engine for registry GET payload",
+                    exc_info=True,
+                )
+
         return {
             "success": True,
             **rcfg.as_dict(),
@@ -366,6 +418,8 @@ class SettingsService:
             "registry_locked": SettingsService.is_registry_locked(settings),
             "available_backends": SettingsService._available_backends(),
             "lakebase": SettingsService._lakebase_runtime_info(rcfg),
+            "graph_engine": graph_engine,
+            "graph_engine_config": graph_engine_config,
         }
 
     @staticmethod
@@ -1150,6 +1204,35 @@ class SettingsService:
                     "reset_lakebase_triplet_cache unavailable; skipping",
                     exc_info=True,
                 )
+            try:
+                _, host, token, registry_cfg = SettingsService._resolve_context(
+                    session_mgr, settings
+                )
+                blob = global_config_service.load(host, token, registry_cfg, force=True)
+                if isinstance(blob, dict) and "graph_engine" not in blob:
+                    ok_seed, msg_seed = global_config_service._save(
+                        host,
+                        token,
+                        registry_cfg,
+                        {
+                            "graph_engine": "ladybug",
+                            "graph_engine_config": (
+                                blob["graph_engine_config"]
+                                if isinstance(blob.get("graph_engine_config"), dict)
+                                else {}
+                            ),
+                        },
+                    )
+                    if not ok_seed:
+                        logger.warning(
+                            "Could not seed graph_engine in registry global config: %s",
+                            msg_seed,
+                        )
+            except Exception:
+                logger.debug(
+                    "Skipping graph_engine seed after registry init",
+                    exc_info=True,
+                )
             return {"success": ok, "message": msg}
         except OntoBricksError:
             raise
@@ -1547,6 +1630,9 @@ class SettingsService:
         _, host, token, registry_cfg = SettingsService._resolve_context(
             session_mgr, settings
         )
+        # Bypass per-process TTL so the Settings Graph DB tab reflects the store
+        # immediately after save (multi-worker and cross-tab).
+        global_config_service.load(host, token, registry_cfg, force=True)
         engine = global_config_service.get_graph_engine(host, token, registry_cfg)
         allowed = list(global_config_service.ALLOWED_GRAPH_ENGINES)
         return {"success": True, "graph_engine": engine, "allowed_engines": allowed}
@@ -1569,7 +1655,11 @@ class SettingsService:
         )
         if not ok:
             raise ValidationError(msg)
-        return {"success": True, "graph_engine": engine}
+        persisted = global_config_service.get_graph_engine(host, token, registry_cfg)
+        SettingsService._mirror_graph_engine_to_domain_registry(
+            session_mgr, engine=persisted
+        )
+        return {"success": True, "graph_engine": persisted}
 
     @staticmethod
     def get_graph_engine_config_result(
@@ -1580,6 +1670,7 @@ class SettingsService:
         _, host, token, registry_cfg = SettingsService._resolve_context(
             session_mgr, settings
         )
+        global_config_service.load(host, token, registry_cfg, force=True)
         cfg = global_config_service.get_graph_engine_config(host, token, registry_cfg)
         return {"success": True, "graph_engine_config": cfg}
 
@@ -1602,7 +1693,187 @@ class SettingsService:
         )
         if not ok:
             raise ValidationError(msg)
-        return {"success": True, "graph_engine_config": config}
+        persisted_cfg = global_config_service.get_graph_engine_config(
+            host, token, registry_cfg
+        )
+        SettingsService._mirror_graph_engine_to_domain_registry(
+            session_mgr, config=persisted_cfg
+        )
+        return {"success": True, "graph_engine_config": persisted_cfg}
+
+    @staticmethod
+    def graph_engine_lakebase_health_result(
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """Probe Lakebase Postgres for the configured graph schema (read-only).
+
+        Uses ``graph_engine_config.database`` (optional) and ``schema`` from
+        registry global config. Never raises — failures become ``success=False``.
+        """
+        import os
+
+        from back.core.databricks import get_lakebase_auth
+        from back.core.graphdb.lakebase.LakebaseBase import (
+            default_schema,
+            validate_graph_schema,
+        )
+
+        auth = get_lakebase_auth()
+        port = int(os.environ.get("PGPORT", "5432") or "5432")
+        bound_db = os.environ.get("PGDATABASE", "").strip()
+        out: Dict[str, Any] = {
+            "success": False,
+            "reason": "",
+            "message": "",
+            "host": os.environ.get("PGHOST", ""),
+            "port": port,
+            "bound_database": bound_db or "",
+            "effective_database": "",
+            "graph_schema": default_schema(),
+            "schema_exists": False,
+            "tables_in_schema": 0,
+        }
+
+        if not auth.is_available:
+            out["reason"] = "no_binding"
+            out["message"] = (
+                "Lakebase Postgres binding missing — set PGHOST and PGUSER "
+                "(Databricks App postgres resource)."
+            )
+            return out
+
+        try:
+            _, host, token, registry_cfg = SettingsService._resolve_context(
+                session_mgr, settings
+            )
+            global_config_service.load(host, token, registry_cfg, force=True)
+            gcfg = global_config_service.get_graph_engine_config(
+                host, token, registry_cfg
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_health context failed: %s", exc)
+            out["reason"] = "context"
+            out["message"] = f"Could not load graph engine config: {exc}"
+            return out
+
+        db_override = ""
+        schema_raw = ""
+        if isinstance(gcfg, dict):
+            db_override = (gcfg.get("database") or "").strip()
+            schema_raw = (gcfg.get("schema") or "").strip()
+
+        try:
+            schema = validate_graph_schema(schema_raw or default_schema())
+        except ValueError as exc:
+            out["reason"] = "bad_schema"
+            out["message"] = str(exc)
+            out["graph_schema"] = schema_raw or default_schema()
+            return out
+
+        out["graph_schema"] = schema
+        base_db = bound_db or auth.database
+        effective_db = db_override or base_db
+        out["bound_database"] = base_db
+        out["effective_database"] = effective_db
+
+        try:
+            from back.core.graphdb.lakebase.pool import _require_psycopg
+
+            psycopg, _ = _require_psycopg()
+        except ImportError as exc:
+            out["reason"] = "no_psycopg"
+            out["message"] = str(exc)
+            return out
+
+        kwargs = auth.kwargs(application_name="ontobricks-graph-health")
+        kwargs["dbname"] = effective_db
+
+        try:
+            with psycopg.connect(**kwargs) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT EXISTS (
+                            SELECT 1 FROM information_schema.schemata
+                            WHERE schema_name = %s
+                        )
+                        """,
+                        (schema,),
+                    )
+                    row = cur.fetchone()
+                    schema_exists = bool(row[0]) if row else False
+                    out["schema_exists"] = schema_exists
+                    table_count = 0
+                    if schema_exists:
+                        cur.execute(
+                            """
+                            SELECT COUNT(*)::bigint
+                            FROM information_schema.tables
+                            WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                            """,
+                            (schema,),
+                        )
+                        row2 = cur.fetchone()
+                        table_count = int(row2[0]) if row2 else 0
+                    out["tables_in_schema"] = table_count
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_health probe failed: %s", exc)
+            out["reason"] = "connect_failed"
+            out["message"] = str(exc)
+            return out
+
+        out["success"] = True
+        out["reason"] = "ok"
+        if schema_exists:
+            out["message"] = (
+                f"Connected to database {effective_db!r}; schema {schema!r} exists "
+                f"({out['tables_in_schema']} table(s))."
+            )
+        else:
+            out["message"] = (
+                f"Connected to database {effective_db!r}, but schema {schema!r} "
+                "does not exist yet — run a Digital Twin build or create the schema."
+            )
+        return out
+
+    @staticmethod
+    def graph_engine_uc_catalogs_result(
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List Unity Catalog names (``SHOW CATALOGS``) for the Lakebase UC picker.
+
+        Read-only; uses the configured SQL warehouse. Returns an empty list with
+        ``success=False`` when the warehouse is missing or the query fails.
+        """
+        out: Dict[str, Any] = {"success": False, "catalogs": [], "message": ""}
+        try:
+            _, host, token, registry_cfg = SettingsService._resolve_context(
+                session_mgr, settings
+            )
+            global_config_service.load(host, token, registry_cfg, force=True)
+            warehouse_id = global_config_service.get_warehouse_id(
+                host, token, registry_cfg
+            )
+            if not warehouse_id:
+                out["message"] = (
+                    "Configure a SQL warehouse under Settings → Databricks first."
+                )
+                return out
+            from back.core.databricks.DatabricksAuth import DatabricksAuth
+            from back.core.databricks.UnityCatalog import UnityCatalog
+
+            auth = DatabricksAuth(host=host, token=token, warehouse_id=warehouse_id)
+            uc = UnityCatalog(auth)
+            catalogs = uc.get_catalogs()
+            out["success"] = True
+            out["catalogs"] = sorted(catalogs) if catalogs else []
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_uc_catalogs failed: %s", exc)
+            out["message"] = str(exc)
+            return out
 
     @staticmethod
     def build_permissions_me(
