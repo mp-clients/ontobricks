@@ -1144,36 +1144,305 @@ class Mapping:
     # Diagnostics
     # ------------------------------------------------------------------
 
-    def run_diagnostics(self) -> Dict[str, Any]:
+    # Match a 3-part Unity Catalog reference following ``FROM`` / ``JOIN``
+    # in a SQL query.  Tolerates back-ticks around any segment but requires
+    # all three segments — bare ``FROM tbl`` references depend on the
+    # warehouse's default catalog/schema and are intentionally skipped
+    # because we cannot probe permissions without ambiguity.
+    _FQN_TABLE_RE = re.compile(
+        r"\b(?:FROM|JOIN)\s+`?([A-Za-z_][\w-]*)`?\.`?([A-Za-z_][\w-]*)`?\.`?([A-Za-z_][\w-]*)`?",
+        re.IGNORECASE,
+    )
+
+    @staticmethod
+    def _extract_fqn_from_sql(sql_query: str) -> List[Tuple[str, str, str]]:
+        """Return every ``catalog.schema.table`` triple found in *sql_query*.
+
+        Matches identifiers after ``FROM`` or ``JOIN`` (with optional
+        backticks).  Two-part and one-part references are skipped — there
+        is no reliable way to verify permissions on them without resolving
+        the warehouse's default catalog/schema, which depends on runtime
+        state.
+        """
+        if not sql_query:
+            return []
+        return [
+            (m.group(1), m.group(2), m.group(3))
+            for m in Mapping._FQN_TABLE_RE.finditer(sql_query)
+        ]
+
+    @staticmethod
+    def _split_table_ref(value: str) -> Optional[Tuple[str, str, str]]:
+        """Parse a string like ``catalog.schema.table`` (with or without
+        backticks) into a tuple, or ``None`` if it isn't a 3-part name."""
+        if not value:
+            return None
+        cleaned = value.replace("`", "").strip()
+        parts = [p.strip() for p in cleaned.split(".") if p.strip()]
+        if len(parts) != 3:
+            return None
+        return (parts[0], parts[1], parts[2])
+
+    def _collect_source_tables(self) -> Dict[Tuple[str, str, str], List[str]]:
+        """Aggregate every distinct 3-part source table referenced by the
+        current mapping, with the entities/relationships that reference it.
+
+        Sources, in priority order:
+          - explicit ``catalog`` + ``schema`` + ``table`` triple on entities
+          - fully-qualified table mentions in entity ``sql_query``
+          - ``source_table`` / ``target_table`` strings on relationships
+          - fully-qualified table mentions in relationship ``sql_query``
+
+        Returns a mapping ``{(catalog, schema, table): [referrer, ...]}``
+        where each *referrer* is a short label such as ``Entity: Person``
+        or ``Rel: assignedTo (source)`` so the diagnostic UI can show
+        *why* this table is being checked.
+        """
+        domain = self._domain
+        assignment = domain.assignment or {}
+        result: Dict[Tuple[str, str, str], List[str]] = {}
+
+        def _add(triple: Optional[Tuple[str, str, str]], referrer: str) -> None:
+            if not triple:
+                return
+            result.setdefault(triple, [])
+            if referrer not in result[triple]:
+                result[triple].append(referrer)
+
+        for ent in assignment.get("entities", []):
+            if ent.get("excluded"):
+                continue
+            label = ent.get("ontology_class_label") or uri_local_name(
+                ent.get("ontology_class", "")
+            ) or "?"
+            referrer = f"Entity: {label}"
+            cat, sch, tbl = (
+                (ent.get("catalog") or "").strip(),
+                (ent.get("schema") or "").strip(),
+                (ent.get("table") or "").strip(),
+            )
+            if cat and sch and tbl:
+                _add((cat, sch, tbl), referrer)
+            for triple in self._extract_fqn_from_sql(ent.get("sql_query") or ""):
+                _add(triple, referrer)
+
+        for rel in assignment.get("relationships", []):
+            if rel.get("excluded"):
+                continue
+            prop = rel.get("property_label") or uri_local_name(
+                rel.get("property", "")
+            ) or "?"
+            for side in ("source_table", "target_table"):
+                referrer = f"Rel: {prop} ({side.split('_')[0]})"
+                _add(self._split_table_ref(rel.get(side, "")), referrer)
+            for triple in self._extract_fqn_from_sql(rel.get("sql_query") or ""):
+                _add(triple, f"Rel: {prop} (sql)")
+
+        return result
+
+    @staticmethod
+    def _classify_sql_error(exc: Exception) -> Tuple[str, str]:
+        """Map a warehouse exception to a ``(status, detail)`` pair.
+
+        We look at the message text — the SDK exposes Databricks error
+        codes as substrings inside the message rather than a typed code,
+        so this is the safest approach without coupling to internals.
+        """
+        msg = str(exc) or exc.__class__.__name__
+        upper = msg.upper()
+        # Permission-denied class — most useful signal of "missing SELECT".
+        if (
+            "PERMISSION_DENIED" in upper
+            or "PERMISSION DENIED" in upper
+            or "INSUFFICIENT" in upper
+            or "DOES NOT HAVE PRIVILEGE" in upper
+            or "ACCESS_DENIED" in upper
+        ):
+            return (
+                "error",
+                f"Missing SELECT privilege for the app's principal: {msg}",
+            )
+        # Object-not-found class.
+        if (
+            "TABLE_OR_VIEW_NOT_FOUND" in upper
+            or "TABLE NOT FOUND" in upper
+            or "TABLE OR VIEW NOT FOUND" in upper
+        ):
+            return ("error", f"Table not found: {msg}")
+        if "SCHEMA_NOT_FOUND" in upper or "SCHEMA NOT FOUND" in upper:
+            return ("error", f"Schema not found: {msg}")
+        if "CATALOG_NOT_FOUND" in upper or "CATALOG NOT FOUND" in upper:
+            return ("error", f"Catalog not found: {msg}")
+        return ("error", f"Probe failed: {msg}")
+
+    def _run_permission_checks(self, client: Any) -> Dict[str, Any]:
+        """Verify SELECT privileges on every distinct source table.
+
+        For each ``catalog.schema.table`` referenced by an entity or
+        relationship mapping we execute ``SELECT * FROM … LIMIT 0`` via
+        the warehouse.  ``LIMIT 0`` exercises the SELECT permission path
+        without returning any data.  Errors are categorised by message
+        keywords (PERMISSION_DENIED, TABLE_OR_VIEW_NOT_FOUND, …) so the
+        UI can show actionable detail.
+
+        When *client* is ``None`` we return a single advisory check so
+        the diagnostic still tells the user why the section is empty.
+        """
+        if client is None:
+            return {
+                "checks": [
+                    {
+                        "table": "",
+                        "referenced_by": [],
+                        "status": "warning",
+                        "check": "client",
+                        "detail": (
+                            "Databricks client is not configured — connect a "
+                            "warehouse to verify SELECT permissions."
+                        ),
+                    }
+                ],
+                "summary": {"total": 1, "ok": 0, "warnings": 1, "errors": 0},
+            }
+
+        triples = self._collect_source_tables()
+        if not triples:
+            return {
+                "checks": [],
+                "summary": {"total": 0, "ok": 0, "warnings": 0, "errors": 0},
+            }
+
+        checks: List[Dict[str, Any]] = []
+        for (cat, sch, tbl), referrers in sorted(triples.items()):
+            fqn = f"`{cat}`.`{sch}`.`{tbl}`"
+            try:
+                client.execute_query(f"SELECT * FROM {fqn} LIMIT 0")
+                status, detail = "ok", "SELECT verified (LIMIT 0 returned)"
+            except Exception as exc:  # noqa: BLE001 — vendor SDK error surface
+                status, detail = self._classify_sql_error(exc)
+                logger.info(
+                    "Mapping diagnostics — SELECT probe failed for %s: %s",
+                    f"{cat}.{sch}.{tbl}",
+                    exc,
+                )
+            checks.append(
+                {
+                    "table": f"{cat}.{sch}.{tbl}",
+                    "referenced_by": list(referrers),
+                    "status": status,
+                    "check": "select",
+                    "detail": detail,
+                }
+            )
+
+        ok = sum(1 for c in checks if c["status"] == "ok")
+        warnings = sum(1 for c in checks if c["status"] == "warning")
+        errors = sum(1 for c in checks if c["status"] == "error")
+        return {
+            "checks": checks,
+            "summary": {
+                "total": len(checks),
+                "ok": ok,
+                "warnings": warnings,
+                "errors": errors,
+            },
+        }
+
+    def run_diagnostics(self, *, client: Any = None) -> Dict[str, Any]:
         """Run comprehensive validation on all entity and relationship mappings.
 
         Checks column existence in source SQL, entity-relationship
-        cross-references, and ontology consistency.
-        """
-        from back.objects.digitaltwin import DigitalTwin
+        cross-references, ontology consistency, and — when *client* is
+        provided — verifies that the app's SQL principal has SELECT on
+        every distinct source table referenced by the mapping.
 
+        The body is composed of small, focused helpers (``_diagnose_entity``,
+        ``_diagnose_relationship``, ``_build_entity_lookup``,
+        ``_build_ontology_index``, ``_aggregate_status``) so that adding a
+        new check or surface only touches one method.
+        """
         domain = self._domain
         ontology = domain.ontology or {}
         assignment = domain.assignment or {}
 
-        ont_classes = {
-            c.get("uri", ""): c for c in ontology.get("classes", []) if c.get("uri")
-        }
-        ont_class_names = {
-            c.get("name", ""): c for c in ontology.get("classes", []) if c.get("name")
-        }
-        ont_props = {
-            p.get("uri", ""): p for p in ontology.get("properties", []) if p.get("uri")
-        }
-        ont_prop_names = {
-            p.get("name", ""): p
-            for p in ontology.get("properties", [])
-            if p.get("name")
-        }
-
+        ont_index = self._build_ontology_index(ontology)
         entities = assignment.get("entities", [])
         relationships = assignment.get("relationships", [])
+        entity_lookup = self._build_entity_lookup(entities)
 
+        entity_results = [
+            self._diagnose_entity(ent, ont_index)
+            for ent in entities
+            if not ent.get("excluded")
+        ]
+        rel_results = [
+            self._diagnose_relationship(rel, entity_lookup, ont_index)
+            for rel in relationships
+            if not rel.get("excluded")
+        ]
+
+        permission_section = self._run_permission_checks(client)
+        perm_checks = permission_section["checks"]
+        perm_summary = permission_section["summary"]
+
+        ok = (
+            sum(1 for e in entity_results if e["status"] == "ok")
+            + sum(1 for r in rel_results if r["status"] == "ok")
+            + perm_summary["ok"]
+        )
+        warnings = (
+            sum(1 for e in entity_results if e["status"] == "warning")
+            + sum(1 for r in rel_results if r["status"] == "warning")
+            + perm_summary["warnings"]
+        )
+        errors = (
+            sum(1 for e in entity_results if e["status"] == "error")
+            + sum(1 for r in rel_results if r["status"] == "error")
+            + perm_summary["errors"]
+        )
+
+        return {
+            "success": True,
+            "entities": entity_results,
+            "relationships": rel_results,
+            "permissions": perm_checks,
+            "summary": {
+                "total": len(entity_results) + len(rel_results) + len(perm_checks),
+                "ok": ok,
+                "warnings": warnings,
+                "errors": errors,
+            },
+        }
+
+    @staticmethod
+    def _build_ontology_index(ontology: Dict[str, Any]) -> Dict[str, Dict]:
+        """Build URI- and name-keyed lookup tables for classes and properties."""
+        return {
+            "classes": {
+                c.get("uri", ""): c
+                for c in ontology.get("classes", [])
+                if c.get("uri")
+            },
+            "class_names": {
+                c.get("name", ""): c
+                for c in ontology.get("classes", [])
+                if c.get("name")
+            },
+            "props": {
+                p.get("uri", ""): p
+                for p in ontology.get("properties", [])
+                if p.get("uri")
+            },
+            "prop_names": {
+                p.get("name", ""): p
+                for p in ontology.get("properties", [])
+                if p.get("name")
+            },
+        }
+
+    @staticmethod
+    def _build_entity_lookup(entities: List[Dict]) -> Dict[str, Dict]:
+        """Index non-excluded entity mappings by every alias used downstream."""
         entity_lookup: Dict[str, Dict] = {}
         for m in entities:
             if m.get("excluded"):
@@ -1192,340 +1461,325 @@ class Mapping:
                 if local:
                     entity_lookup[local] = m
                     entity_lookup[local.lower()] = m
+        return entity_lookup
 
-        entity_results = []
-        for ent in entities:
-            if ent.get("excluded"):
-                continue
-            label = ent.get("ontology_class_label") or ent.get(
-                "ontology_class", "Unknown"
+    @staticmethod
+    def _aggregate_status(checks: List[Dict[str, str]]) -> str:
+        """Return the worst status (``error`` > ``warning`` > ``ok``) in *checks*."""
+        worst = "ok"
+        for c in checks:
+            if c["status"] == "error":
+                return "error"
+            if c["status"] == "warning":
+                worst = "warning"
+        return worst
+
+    @staticmethod
+    def _diagnose_entity(
+        ent: Dict[str, Any], ont_index: Dict[str, Dict]
+    ) -> Dict[str, Any]:
+        """Validate a single entity mapping (source, id/label/attribute columns, ontology class)."""
+        from back.objects.digitaltwin import DigitalTwin
+
+        ont_classes = ont_index["classes"]
+        ont_class_names = ont_index["class_names"]
+
+        label = ent.get("ontology_class_label") or ent.get(
+            "ontology_class", "Unknown"
+        )
+        class_uri = ent.get("ontology_class", "")
+        sql_query = (ent.get("sql_query") or "").strip()
+        table = ent.get("table") or ""
+        source = sql_query or table or ""
+        id_col = ent.get("id_column", "")
+        label_col = ent.get("label_column", "")
+        attr_map = ent.get("attribute_mappings", {})
+
+        checks: List[Dict[str, str]] = []
+        available_cols = (
+            DigitalTwin._extract_select_columns(sql_query) if sql_query else None
+        )
+
+        if not source:
+            checks.append(
+                {
+                    "check": "source",
+                    "status": "error",
+                    "detail": "No SQL query or table defined",
+                }
             )
-            class_uri = ent.get("ontology_class", "")
-            sql_query = (ent.get("sql_query") or "").strip()
-            table = ent.get("table") or ""
-            source = sql_query or table or ""
-            id_col = ent.get("id_column", "")
-            label_col = ent.get("label_column", "")
-            attr_map = ent.get("attribute_mappings", {})
-
-            checks: List[Dict[str, str]] = []
-            available_cols = (
-                DigitalTwin._extract_select_columns(sql_query) if sql_query else None
+        else:
+            checks.append(
+                {"check": "source", "status": "ok", "detail": f"Source defined"}
             )
 
-            if not source:
+        if not id_col:
+            checks.append(
+                {
+                    "check": "id_column",
+                    "status": "error",
+                    "detail": "No ID column defined",
+                }
+            )
+        elif available_cols and id_col not in available_cols:
+            checks.append(
+                {
+                    "check": "id_column",
+                    "status": "error",
+                    "detail": f"Column '{id_col}' not in source output {sorted(available_cols)}",
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "check": "id_column",
+                    "status": "ok",
+                    "detail": f"Column '{id_col}' found",
+                }
+            )
+
+        if label_col:
+            if available_cols and label_col not in available_cols:
                 checks.append(
                     {
-                        "check": "source",
+                        "check": "label_column",
                         "status": "error",
-                        "detail": "No SQL query or table defined",
+                        "detail": f"Column '{label_col}' not in source output {sorted(available_cols)}",
                     }
                 )
             else:
                 checks.append(
-                    {"check": "source", "status": "ok", "detail": f"Source defined"}
-                )
-
-            if not id_col:
-                checks.append(
                     {
-                        "check": "id_column",
-                        "status": "error",
-                        "detail": "No ID column defined",
-                    }
-                )
-            elif available_cols and id_col not in available_cols:
-                checks.append(
-                    {
-                        "check": "id_column",
-                        "status": "error",
-                        "detail": f"Column '{id_col}' not in source output {sorted(available_cols)}",
-                    }
-                )
-            else:
-                checks.append(
-                    {
-                        "check": "id_column",
+                        "check": "label_column",
                         "status": "ok",
-                        "detail": f"Column '{id_col}' found",
+                        "detail": f"Column '{label_col}' found",
                     }
                 )
 
-            if label_col:
-                if available_cols and label_col not in available_cols:
-                    checks.append(
-                        {
-                            "check": "label_column",
-                            "status": "error",
-                            "detail": f"Column '{label_col}' not in source output {sorted(available_cols)}",
-                        }
-                    )
-                else:
-                    checks.append(
-                        {
-                            "check": "label_column",
-                            "status": "ok",
-                            "detail": f"Column '{label_col}' found",
-                        }
-                    )
+        for attr_name, col_name in attr_map.items():
+            if not col_name:
+                continue
+            if available_cols and col_name not in available_cols:
+                checks.append(
+                    {
+                        "check": f"attribute:{attr_name}",
+                        "status": "error",
+                        "detail": f"Column '{col_name}' not in source output {sorted(available_cols)}",
+                    }
+                )
+            elif available_cols:
+                checks.append(
+                    {
+                        "check": f"attribute:{attr_name}",
+                        "status": "ok",
+                        "detail": f"Column '{col_name}' found",
+                    }
+                )
 
-            for attr_name, col_name in attr_map.items():
-                if not col_name:
-                    continue
-                if available_cols and col_name not in available_cols:
-                    checks.append(
-                        {
-                            "check": f"attribute:{attr_name}",
-                            "status": "error",
-                            "detail": f"Column '{col_name}' not in source output {sorted(available_cols)}",
-                        }
-                    )
-                elif available_cols:
-                    checks.append(
-                        {
-                            "check": f"attribute:{attr_name}",
-                            "status": "ok",
-                            "detail": f"Column '{col_name}' found",
-                        }
-                    )
-
-            if class_uri and class_uri not in ont_classes:
-                local = uri_local_name(class_uri)
-                if local not in ont_class_names:
-                    checks.append(
-                        {
-                            "check": "ontology_class",
-                            "status": "warning",
-                            "detail": f"Class '{class_uri}' not found in ontology",
-                        }
-                    )
-                else:
-                    checks.append(
-                        {
-                            "check": "ontology_class",
-                            "status": "ok",
-                            "detail": f"Class '{local}' found",
-                        }
-                    )
-            elif class_uri:
+        if class_uri and class_uri not in ont_classes:
+            local = uri_local_name(class_uri)
+            if local not in ont_class_names:
+                checks.append(
+                    {
+                        "check": "ontology_class",
+                        "status": "warning",
+                        "detail": f"Class '{class_uri}' not found in ontology",
+                    }
+                )
+            else:
                 checks.append(
                     {
                         "check": "ontology_class",
                         "status": "ok",
-                        "detail": f"Class '{uri_local_name(class_uri)}' found",
+                        "detail": f"Class '{local}' found",
                     }
                 )
-
-            worst = "ok"
-            for c in checks:
-                if c["status"] == "error":
-                    worst = "error"
-                    break
-                if c["status"] == "warning":
-                    worst = "warning"
-
-            entity_results.append(
+        elif class_uri:
+            checks.append(
                 {
-                    "ontology_class": class_uri,
-                    "label": label,
-                    "status": worst,
-                    "source": source,
-                    "available_columns": (
-                        sorted(available_cols) if available_cols else None
-                    ),
-                    "checks": checks,
+                    "check": "ontology_class",
+                    "status": "ok",
+                    "detail": f"Class '{uri_local_name(class_uri)}' found",
                 }
             )
-
-        rel_results = []
-        for rel in relationships:
-            if rel.get("excluded"):
-                continue
-            prop_uri = rel.get("property", "")
-            prop_label = rel.get("property_label") or prop_uri
-            sql_query = (rel.get("sql_query") or "").strip()
-            src_class = rel.get("source_class", "")
-            src_label = rel.get("source_class_label", "")
-            tgt_class = rel.get("target_class", "")
-            tgt_label = rel.get("target_class_label", "")
-            src_id_col = rel.get("source_id_column") or rel.get("source_column", "")
-            tgt_id_col = rel.get("target_id_column") or rel.get("target_column", "")
-
-            checks: List[Dict[str, str]] = []
-            available_cols = (
-                DigitalTwin._extract_select_columns(sql_query) if sql_query else None
-            )
-
-            if not sql_query:
-                checks.append(
-                    {
-                        "check": "source",
-                        "status": "error",
-                        "detail": "No SQL query defined",
-                    }
-                )
-            else:
-                checks.append(
-                    {"check": "source", "status": "ok", "detail": "SQL query defined"}
-                )
-
-            if src_id_col and available_cols and src_id_col not in available_cols:
-                checks.append(
-                    {
-                        "check": "source_id_column",
-                        "status": "error",
-                        "detail": f"Column '{src_id_col}' not in source output {sorted(available_cols)}",
-                    }
-                )
-            elif src_id_col:
-                checks.append(
-                    {
-                        "check": "source_id_column",
-                        "status": "ok",
-                        "detail": f"Column '{src_id_col}' found",
-                    }
-                )
-
-            if tgt_id_col and available_cols and tgt_id_col not in available_cols:
-                checks.append(
-                    {
-                        "check": "target_id_column",
-                        "status": "error",
-                        "detail": f"Column '{tgt_id_col}' not in source output {sorted(available_cols)}",
-                    }
-                )
-            elif tgt_id_col:
-                checks.append(
-                    {
-                        "check": "target_id_column",
-                        "status": "ok",
-                        "detail": f"Column '{tgt_id_col}' found",
-                    }
-                )
-
-            resolved_src = self._resolve_entity(entity_lookup, src_class, src_label)
-            if resolved_src:
-                checks.append(
-                    {
-                        "check": "source_entity",
-                        "status": "ok",
-                        "detail": f"Resolves to entity '{resolved_src.get('ontology_class_label') or resolved_src.get('ontology_class', '?')}'",
-                    }
-                )
-            else:
-                name = src_label or src_class or "(empty)"
-                checks.append(
-                    {
-                        "check": "source_entity",
-                        "status": "error",
-                        "detail": f"Source entity '{name}' not found in entity mappings",
-                    }
-                )
-
-            resolved_tgt = self._resolve_entity(entity_lookup, tgt_class, tgt_label)
-            if resolved_tgt:
-                checks.append(
-                    {
-                        "check": "target_entity",
-                        "status": "ok",
-                        "detail": f"Resolves to entity '{resolved_tgt.get('ontology_class_label') or resolved_tgt.get('ontology_class', '?')}'",
-                    }
-                )
-            else:
-                name = tgt_label or tgt_class or "(empty)"
-                checks.append(
-                    {
-                        "check": "target_entity",
-                        "status": "error",
-                        "detail": f"Target entity '{name}' not found in entity mappings",
-                    }
-                )
-
-            ont_prop = ont_props.get(prop_uri) or ont_prop_names.get(prop_label)
-            if ont_prop:
-                checks.append(
-                    {
-                        "check": "ontology_property",
-                        "status": "ok",
-                        "detail": f"Property '{ont_prop.get('name', prop_uri)}' found",
-                    }
-                )
-                ont_domain = ont_prop.get("domain", "")
-                ont_range = ont_prop.get("range", "")
-                if ont_domain and resolved_src:
-                    src_name = (resolved_src.get("ontology_class_label") or "").lower()
-                    src_uri = resolved_src.get("ontology_class", "")
-                    if ont_domain.lower() != src_name and ont_domain != src_uri:
-                        local_src = uri_local_name(src_uri)
-                        if ont_domain.lower() != local_src.lower():
-                            checks.append(
-                                {
-                                    "check": "domain_match",
-                                    "status": "warning",
-                                    "detail": f"Ontology domain is '{ont_domain}' but source entity is '{src_name or local_src}'",
-                                }
-                            )
-                if ont_range and resolved_tgt:
-                    tgt_name = (resolved_tgt.get("ontology_class_label") or "").lower()
-                    tgt_uri = resolved_tgt.get("ontology_class", "")
-                    if ont_range.lower() != tgt_name and ont_range != tgt_uri:
-                        local_tgt = uri_local_name(tgt_uri)
-                        if ont_range.lower() != local_tgt.lower():
-                            checks.append(
-                                {
-                                    "check": "range_match",
-                                    "status": "warning",
-                                    "detail": f"Ontology range is '{ont_range}' but target entity is '{tgt_name or local_tgt}'",
-                                }
-                            )
-            elif prop_uri:
-                checks.append(
-                    {
-                        "check": "ontology_property",
-                        "status": "warning",
-                        "detail": f"Property '{prop_uri}' not found in ontology",
-                    }
-                )
-
-            worst = "ok"
-            for c in checks:
-                if c["status"] == "error":
-                    worst = "error"
-                    break
-                if c["status"] == "warning":
-                    worst = "warning"
-
-            rel_results.append(
-                {
-                    "property": prop_uri,
-                    "label": prop_label,
-                    "source_class": src_label or src_class,
-                    "target_class": tgt_label or tgt_class,
-                    "status": worst,
-                    "checks": checks,
-                }
-            )
-
-        ok = sum(1 for e in entity_results if e["status"] == "ok") + sum(
-            1 for r in rel_results if r["status"] == "ok"
-        )
-        warnings = sum(1 for e in entity_results if e["status"] == "warning") + sum(
-            1 for r in rel_results if r["status"] == "warning"
-        )
-        errors = sum(1 for e in entity_results if e["status"] == "error") + sum(
-            1 for r in rel_results if r["status"] == "error"
-        )
 
         return {
-            "success": True,
-            "entities": entity_results,
-            "relationships": rel_results,
-            "summary": {
-                "total": len(entity_results) + len(rel_results),
-                "ok": ok,
-                "warnings": warnings,
-                "errors": errors,
-            },
+            "ontology_class": class_uri,
+            "label": label,
+            "status": Mapping._aggregate_status(checks),
+            "source": source,
+            "available_columns": (
+                sorted(available_cols) if available_cols else None
+            ),
+            "checks": checks,
+        }
+
+    @classmethod
+    def _diagnose_relationship(
+        cls,
+        rel: Dict[str, Any],
+        entity_lookup: Dict[str, Dict],
+        ont_index: Dict[str, Dict],
+    ) -> Dict[str, Any]:
+        """Validate a single relationship mapping (SQL columns, source/target entities, property domain/range)."""
+        from back.objects.digitaltwin import DigitalTwin
+
+        ont_props = ont_index["props"]
+        ont_prop_names = ont_index["prop_names"]
+
+        prop_uri = rel.get("property", "")
+        prop_label = rel.get("property_label") or prop_uri
+        sql_query = (rel.get("sql_query") or "").strip()
+        src_class = rel.get("source_class", "")
+        src_label = rel.get("source_class_label", "")
+        tgt_class = rel.get("target_class", "")
+        tgt_label = rel.get("target_class_label", "")
+        src_id_col = rel.get("source_id_column") or rel.get("source_column", "")
+        tgt_id_col = rel.get("target_id_column") or rel.get("target_column", "")
+
+        checks: List[Dict[str, str]] = []
+        available_cols = (
+            DigitalTwin._extract_select_columns(sql_query) if sql_query else None
+        )
+
+        if not sql_query:
+            checks.append(
+                {
+                    "check": "source",
+                    "status": "error",
+                    "detail": "No SQL query defined",
+                }
+            )
+        else:
+            checks.append(
+                {"check": "source", "status": "ok", "detail": "SQL query defined"}
+            )
+
+        if src_id_col and available_cols and src_id_col not in available_cols:
+            checks.append(
+                {
+                    "check": "source_id_column",
+                    "status": "error",
+                    "detail": f"Column '{src_id_col}' not in source output {sorted(available_cols)}",
+                }
+            )
+        elif src_id_col:
+            checks.append(
+                {
+                    "check": "source_id_column",
+                    "status": "ok",
+                    "detail": f"Column '{src_id_col}' found",
+                }
+            )
+
+        if tgt_id_col and available_cols and tgt_id_col not in available_cols:
+            checks.append(
+                {
+                    "check": "target_id_column",
+                    "status": "error",
+                    "detail": f"Column '{tgt_id_col}' not in source output {sorted(available_cols)}",
+                }
+            )
+        elif tgt_id_col:
+            checks.append(
+                {
+                    "check": "target_id_column",
+                    "status": "ok",
+                    "detail": f"Column '{tgt_id_col}' found",
+                }
+            )
+
+        resolved_src = cls._resolve_entity(entity_lookup, src_class, src_label)
+        if resolved_src:
+            checks.append(
+                {
+                    "check": "source_entity",
+                    "status": "ok",
+                    "detail": f"Resolves to entity '{resolved_src.get('ontology_class_label') or resolved_src.get('ontology_class', '?')}'",
+                }
+            )
+        else:
+            name = src_label or src_class or "(empty)"
+            checks.append(
+                {
+                    "check": "source_entity",
+                    "status": "error",
+                    "detail": f"Source entity '{name}' not found in entity mappings",
+                }
+            )
+
+        resolved_tgt = cls._resolve_entity(entity_lookup, tgt_class, tgt_label)
+        if resolved_tgt:
+            checks.append(
+                {
+                    "check": "target_entity",
+                    "status": "ok",
+                    "detail": f"Resolves to entity '{resolved_tgt.get('ontology_class_label') or resolved_tgt.get('ontology_class', '?')}'",
+                }
+            )
+        else:
+            name = tgt_label or tgt_class or "(empty)"
+            checks.append(
+                {
+                    "check": "target_entity",
+                    "status": "error",
+                    "detail": f"Target entity '{name}' not found in entity mappings",
+                }
+            )
+
+        ont_prop = ont_props.get(prop_uri) or ont_prop_names.get(prop_label)
+        if ont_prop:
+            checks.append(
+                {
+                    "check": "ontology_property",
+                    "status": "ok",
+                    "detail": f"Property '{ont_prop.get('name', prop_uri)}' found",
+                }
+            )
+            ont_domain = ont_prop.get("domain", "")
+            ont_range = ont_prop.get("range", "")
+            if ont_domain and resolved_src:
+                src_name = (resolved_src.get("ontology_class_label") or "").lower()
+                src_uri = resolved_src.get("ontology_class", "")
+                if ont_domain.lower() != src_name and ont_domain != src_uri:
+                    local_src = uri_local_name(src_uri)
+                    if ont_domain.lower() != local_src.lower():
+                        checks.append(
+                            {
+                                "check": "domain_match",
+                                "status": "warning",
+                                "detail": f"Ontology domain is '{ont_domain}' but source entity is '{src_name or local_src}'",
+                            }
+                        )
+            if ont_range and resolved_tgt:
+                tgt_name = (resolved_tgt.get("ontology_class_label") or "").lower()
+                tgt_uri = resolved_tgt.get("ontology_class", "")
+                if ont_range.lower() != tgt_name and ont_range != tgt_uri:
+                    local_tgt = uri_local_name(tgt_uri)
+                    if ont_range.lower() != local_tgt.lower():
+                        checks.append(
+                            {
+                                "check": "range_match",
+                                "status": "warning",
+                                "detail": f"Ontology range is '{ont_range}' but target entity is '{tgt_name or local_tgt}'",
+                            }
+                        )
+        elif prop_uri:
+            checks.append(
+                {
+                    "check": "ontology_property",
+                    "status": "warning",
+                    "detail": f"Property '{prop_uri}' not found in ontology",
+                }
+            )
+
+        return {
+            "property": prop_uri,
+            "label": prop_label,
+            "source_class": src_label or src_class,
+            "target_class": tgt_label or tgt_class,
+            "status": cls._aggregate_status(checks),
+            "checks": checks,
         }
 
     @staticmethod

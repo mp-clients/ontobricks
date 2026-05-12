@@ -2,13 +2,33 @@
 
 import uuid
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from back.core.logging import get_logger
 from back.core.task_manager.models import Task, TaskStatus, TaskStep
 
 logger = get_logger(__name__)
+
+
+def _now_iso() -> str:
+    """Return UTC ISO timestamp for API consumers."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _format_duration(seconds: Optional[float]) -> str:
+    """Human-friendly duration used in log lines and notifications."""
+    if seconds is None:
+        return "n/a"
+    if seconds < 1:
+        return f"{int(seconds * 1000)}ms"
+    if seconds < 60:
+        return f"{seconds:.2f}s"
+    minutes, rem = divmod(seconds, 60)
+    if minutes < 60:
+        return f"{int(minutes)}m {rem:.1f}s"
+    hours, rem_min = divmod(minutes, 60)
+    return f"{int(hours)}h {int(rem_min)}m"
 
 
 class TaskManager:
@@ -71,21 +91,29 @@ class TaskManager:
         if not task:
             return False
         task.status = TaskStatus.RUNNING
-        task.started_at = datetime.now().isoformat()
+        task.started_at = _now_iso()
         task.message = message
         task.progress = 0
         if task.steps:
             task.steps[0].status = "running"
-            task.steps[0].started_at = datetime.now().isoformat()
+            task.steps[0].started_at = _now_iso()
             task.current_step = 0
             logger.info(
-                "Task %s started, step 1/%s: %s",
+                "START task %s [%s] — %s (step 1/%s: %s)",
                 task_id,
+                task.task_type,
+                task.name,
                 len(task.steps),
                 task.steps[0].name,
             )
         else:
-            logger.info("Task %s started: %s", task_id, message)
+            logger.info(
+                "START task %s [%s] — %s: %s",
+                task_id,
+                task.task_type,
+                task.name,
+                message,
+            )
         return True
 
     def update_progress(self, task_id: str, progress: int, message: str = None) -> bool:
@@ -104,11 +132,11 @@ class TaskManager:
             return False
         if task.current_step < len(task.steps):
             task.steps[task.current_step].status = "completed"
-            task.steps[task.current_step].completed_at = datetime.now().isoformat()
+            task.steps[task.current_step].completed_at = _now_iso()
         task.current_step += 1
         if task.current_step < len(task.steps):
             task.steps[task.current_step].status = "running"
-            task.steps[task.current_step].started_at = datetime.now().isoformat()
+            task.steps[task.current_step].started_at = _now_iso()
             if message:
                 task.message = message
             else:
@@ -124,6 +152,70 @@ class TaskManager:
         task.progress = max(task.progress, step_progress)
         return True
 
+    def complete_current_step(self, task_id: str, message: str = None) -> bool:
+        """Mark the currently *running* step as completed without starting the next.
+
+        Unlike ``advance_step``, this does not activate a subsequent step.  Use
+        when the step's heavy work continues in another thread (e.g. Volume
+        upload) but the tracked job should show this phase as done so the UI
+        can move on to ``complete_task``.
+        """
+        task = self._tasks.get(task_id)
+        if not task or not task.steps:
+            return False
+        if task.current_step >= len(task.steps):
+            return False
+        step = task.steps[task.current_step]
+        if step.status == "running":
+            step.status = "completed"
+            step.completed_at = _now_iso()
+        task.current_step += 1
+        if message is not None:
+            task.message = message
+        n = len(task.steps)
+        pct = int((task.current_step / n) * 100) if n else 100
+        task.progress = max(task.progress, min(100, pct))
+        if task.current_step >= n:
+            task.progress = max(task.progress, 100)
+        return True
+
+    def skip_step(self, task_id: str, message: str = None) -> bool:
+        """Mark the current step as skipped and advance to the next one.
+
+        Use this when a workflow phase isn't executed for the current run
+        (e.g. *Checking source tables* when the user forced a full rebuild).
+        Without this, the seeded step list and the actual execution drift
+        because the next ``advance_step`` call lands a "creating view"
+        message inside a row labelled "checking source tables".
+        """
+        task = self._tasks.get(task_id)
+        if not task or not task.steps:
+            return False
+        now = _now_iso()
+        if task.current_step < len(task.steps):
+            step = task.steps[task.current_step]
+            step.status = "skipped"
+            step.started_at = step.started_at or now
+            step.completed_at = now
+            logger.info(
+                "Task %s step %s/%s skipped: %s",
+                task_id,
+                task.current_step + 1,
+                len(task.steps),
+                step.name,
+            )
+        task.current_step += 1
+        if task.current_step < len(task.steps):
+            task.steps[task.current_step].status = "running"
+            task.steps[task.current_step].started_at = _now_iso()
+            if message:
+                task.message = message
+            else:
+                task.message = task.steps[task.current_step].description
+        step_progress = int((task.current_step / len(task.steps)) * 100)
+        task.progress = max(task.progress, step_progress)
+        return True
+
     def complete_task(
         self, task_id: str, result: Any = None, message: str = "Completed"
     ) -> bool:
@@ -131,15 +223,21 @@ class TaskManager:
         if not task:
             return False
         task.status = TaskStatus.COMPLETED
-        task.completed_at = datetime.now().isoformat()
+        task.completed_at = _now_iso()
         task.progress = 100
         task.message = message
         task.result = result
         for step in task.steps:
-            if step.status != "completed":
+            if step.status not in ("completed", "skipped"):
                 step.status = "completed"
-                step.completed_at = datetime.now().isoformat()
-        logger.info("Task %s completed: %s", task_id, message)
+                step.completed_at = _now_iso()
+        logger.info(
+            "END task %s [%s] completed in %s — %s",
+            task_id,
+            task.task_type,
+            _format_duration(task.duration_seconds()),
+            message,
+        )
         return True
 
     def fail_task(self, task_id: str, error: str) -> bool:
@@ -147,12 +245,19 @@ class TaskManager:
         if not task:
             return False
         task.status = TaskStatus.FAILED
-        task.completed_at = datetime.now().isoformat()
+        task.completed_at = _now_iso()
         task.error = error
         task.message = f"Failed: {error[:100]}"
         if task.steps and task.current_step < len(task.steps):
             task.steps[task.current_step].status = "failed"
-        logger.error("Task %s failed: %s", task_id, error)
+        duration = _format_duration(task.duration_seconds())
+        logger.error("Task %s failed after %s: %s", task_id, duration, error)
+        logger.info(
+            "END task %s [%s] failed in %s",
+            task_id,
+            task.task_type,
+            duration,
+        )
         return True
 
     def cancel_task(self, task_id: str) -> bool:
@@ -161,9 +266,14 @@ class TaskManager:
             return False
         if task.status in (TaskStatus.PENDING, TaskStatus.RUNNING):
             task.status = TaskStatus.CANCELLED
-            task.completed_at = datetime.now().isoformat()
+            task.completed_at = _now_iso()
             task.message = "Cancelled"
-            logger.info("Task %s cancelled", task_id)
+            logger.info(
+                "END task %s [%s] cancelled in %s",
+                task_id,
+                task.task_type,
+                _format_duration(task.duration_seconds()),
+            )
             return True
         return False
 

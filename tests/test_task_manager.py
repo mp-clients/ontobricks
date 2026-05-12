@@ -1,7 +1,11 @@
 """Tests for back.core.task_manager — async task tracking."""
 
+import logging
+import time
+
 import pytest
 from back.core.task_manager import TaskManager, TaskStatus, Task, TaskStep
+from back.core.task_manager.TaskManager import _format_duration
 
 
 @pytest.fixture(autouse=True)
@@ -136,6 +140,73 @@ class TestTaskLifecycle:
     def test_advance_step_nonexistent(self, mgr):
         assert mgr.advance_step("nope") is False
 
+    def test_skip_step_marks_skipped_and_advances(self, mgr):
+        steps = [
+            {"name": "s1", "description": "d1"},
+            {"name": "s2", "description": "d2"},
+            {"name": "s3", "description": "d3"},
+        ]
+        task = mgr.create_task("T", "t", steps=steps)
+        mgr.start_task(task.id)
+        assert mgr.skip_step(task.id, "skip reason")
+        assert task.steps[0].status == "skipped"
+        assert task.steps[0].started_at is not None
+        assert task.steps[0].completed_at is not None
+        assert task.steps[1].status == "running"
+        assert task.current_step == 1
+
+    def test_skip_step_no_steps(self, mgr):
+        task = mgr.create_task("T", "t")
+        assert mgr.skip_step(task.id) is False
+
+    def test_skip_step_nonexistent(self, mgr):
+        assert mgr.skip_step("nope") is False
+
+    def test_complete_current_step_marks_running_done(self, mgr):
+        steps = [
+            {"name": "s1", "description": "d1"},
+            {"name": "s2", "description": "d2"},
+        ]
+        task = mgr.create_task("T", "t", steps=steps)
+        mgr.start_task(task.id)
+        assert mgr.complete_current_step(task.id, "Phase done async")
+        assert task.steps[0].status == "completed"
+        assert task.current_step == 1
+        assert task.message == "Phase done async"
+        assert task.steps[1].status == "pending"
+
+    def test_complete_current_step_at_last_step_sets_progress_100(self, mgr):
+        steps = [{"name": "only", "description": "solo"}]
+        task = mgr.create_task("T", "t", steps=steps)
+        mgr.start_task(task.id)
+        assert mgr.complete_current_step(task.id)
+        assert task.current_step == 1
+        assert task.progress == 100
+        assert task.steps[0].status == "completed"
+
+    def test_complete_current_step_no_steps(self, mgr):
+        task = mgr.create_task("T", "t")
+        assert mgr.complete_current_step(task.id) is False
+
+    def test_complete_preserves_skipped_status(self, mgr):
+        steps = [
+            {"name": "s1", "description": "d1"},
+            {"name": "s2", "description": "d2"},
+        ]
+        task = mgr.create_task("T", "t", steps=steps)
+        mgr.start_task(task.id)
+        mgr.skip_step(task.id)
+        mgr.complete_task(task.id)
+        assert task.steps[0].status == "skipped"
+        assert task.steps[1].status == "completed"
+
+    def test_skip_step_in_to_dict(self, mgr):
+        task = mgr.create_task("T", "t", steps=[{"name": "s1", "description": "d1"}])
+        mgr.start_task(task.id)
+        mgr.skip_step(task.id)
+        d = task.to_dict()
+        assert d["steps"][0]["status"] == "skipped"
+
     def test_complete(self, mgr):
         task = mgr.create_task("T", "t")
         mgr.start_task(task.id)
@@ -250,3 +321,112 @@ class TestQueryAndCleanup:
         mgr.create_task("T5", "t")
         mgr.create_task("T6", "t")
         assert len(mgr.get_all_tasks()) <= 5
+
+
+class TestDuration:
+    def test_format_duration_buckets(self):
+        assert _format_duration(None) == "n/a"
+        assert _format_duration(0.25).endswith("ms")
+        assert _format_duration(2.5).endswith("s")
+        assert "m " in _format_duration(75)
+        assert "h " in _format_duration(3700)
+
+    def test_pending_duration_grows_from_creation(self, mgr):
+        task = mgr.create_task("T", "t")
+        first = task.duration_seconds()
+        assert first is not None and first >= 0.0
+        time.sleep(0.01)
+        second = task.duration_seconds()
+        assert second >= first
+
+    def test_running_duration_uses_started_at(self, mgr):
+        task = mgr.create_task("T", "t")
+        mgr.start_task(task.id)
+        time.sleep(0.01)
+        d = task.duration_seconds()
+        assert d is not None and d > 0.0
+
+    def test_completed_duration_is_frozen(self, mgr):
+        task = mgr.create_task("T", "t")
+        mgr.start_task(task.id)
+        time.sleep(0.01)
+        mgr.complete_task(task.id)
+        first = task.duration_seconds()
+        time.sleep(0.02)
+        second = task.duration_seconds()
+        assert first == second  # terminal duration must not keep growing
+
+    def test_duration_seconds_in_to_dict(self, mgr):
+        task = mgr.create_task("T", "t")
+        d = task.to_dict()
+        assert "duration_seconds" in d
+        assert isinstance(d["duration_seconds"], float)
+
+    def test_duration_tolerates_mixed_tz_timestamps(self):
+        task = Task(
+            id="tz1",
+            name="TZ",
+            task_type="unit",
+            started_at="2026-05-07T08:00:00+00:00",
+            completed_at="2026-05-07T08:00:01",
+        )
+        assert task.duration_seconds() == 1.0
+
+
+class TestStartEndLogging:
+    """Verify the START/END markers and duration suffix in TaskManager logs.
+
+    LogManager.setup() (triggered by other tests in the full suite) sets
+    ``propagate=False`` on the ``ontobricks`` logger, so caplog's default
+    root-level capture misses them.  We attach the caplog handler directly
+    to the TaskManager's logger to make these tests robust to suite order.
+    """
+
+    @pytest.fixture
+    def task_logs(self, caplog):
+        target = logging.getLogger("ontobricks.core.task_manager.TaskManager")
+        target.addHandler(caplog.handler)
+        target.setLevel(logging.INFO)
+        try:
+            yield caplog
+        finally:
+            target.removeHandler(caplog.handler)
+
+    def test_start_log_uses_start_marker(self, mgr, task_logs):
+        task = mgr.create_task("MyTask", "demo")
+        mgr.start_task(task.id, "Begin")
+        assert any(
+            "START task" in r.message and task.id in r.message
+            for r in task_logs.records
+        )
+
+    def test_complete_log_uses_end_marker_with_duration(self, mgr, task_logs):
+        task = mgr.create_task("MyTask", "demo")
+        mgr.start_task(task.id)
+        mgr.complete_task(task.id, message="Done")
+        end = [
+            r for r in task_logs.records
+            if "END task" in r.message and task.id in r.message
+        ]
+        assert end, "expected END log line on completion"
+        assert "completed in" in end[-1].message
+
+    def test_fail_log_uses_end_marker_with_duration(self, mgr, task_logs):
+        task = mgr.create_task("MyTask", "demo")
+        mgr.start_task(task.id)
+        mgr.fail_task(task.id, "boom")
+        end = [
+            r for r in task_logs.records
+            if "END task" in r.message and "failed in" in r.message
+        ]
+        assert end
+
+    def test_cancel_log_uses_end_marker_with_duration(self, mgr, task_logs):
+        task = mgr.create_task("MyTask", "demo")
+        mgr.start_task(task.id)
+        mgr.cancel_task(task.id)
+        end = [
+            r for r in task_logs.records
+            if "END task" in r.message and "cancelled in" in r.message
+        ]
+        assert end
