@@ -305,7 +305,6 @@ class Domain:
         """
         delta = self._s.delta
         reg = self._s.registry
-        snapshot_table = self._s.snapshot_table
 
         return {
             "name": self._s.info.get("name", "NewDomain"),
@@ -317,7 +316,6 @@ class Domain:
             "llm_endpoint": self._s.info.get("llm_endpoint", ""),
             "mcp_enabled": self._s.info.get("mcp_enabled", False),
             "delta": delta,
-            "snapshot_table": snapshot_table,
             "ladybug": self._s.ladybug,
             "has_ontology": len(self._s.get_classes()) > 0,
             "has_mapping": len(self._s.get_entity_mappings()) > 0,

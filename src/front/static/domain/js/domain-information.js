@@ -411,12 +411,7 @@ function refreshDtNamesFromForm() {
         tsEl.value = prefix ? prefix.catalog + '.' + prefix.schema + '.' + tsName : (safe ? tsName : '');
     }
 
-    const snapEl = document.getElementById('domainSnapshotTableName');
-    if (snapEl) {
-        const prefix = _splitFqnPrefix(snapEl.value);
-        const snapName = '_ob_snapshot_' + safe + '_v' + safeVersion;
-        snapEl.value = prefix ? prefix.catalog + '.' + prefix.schema + '.' + snapName : (safe ? snapName : '');
-    }
+
 
     const localEl = document.getElementById('ladybugLocalPath');
     const cfg = window.__TRIPLESTORE_CONFIG || {};

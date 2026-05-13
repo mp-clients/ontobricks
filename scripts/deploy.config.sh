@@ -77,10 +77,18 @@ DEFAULT_LAKEBASE_BRANCH="production"
 DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT="db-8u4l-0na72ub5sp"
 DEFAULT_LAKEBASE_REGISTRY_SCHEMA="ontobricks_registry"
 
-# 3b. Lakebase GRANT bootstrap (only the database needs a literal
-# default — the instance and schema track LAKEBASE_PROJECT and
-# LAKEBASE_REGISTRY_SCHEMA respectively, see section 3b below).
+# 3b. Lakebase GRANT bootstrap (registry side)
+# Only the database needs a literal default — instance and schema track
+# LAKEBASE_PROJECT and LAKEBASE_REGISTRY_SCHEMA respectively.
 DEFAULT_LAKEBASE_BOOTSTRAP_DATABASE="ontobricks_registry"
+
+# 3c. Lakebase GRANT bootstrap (Graph DB side)
+# Set these when the Graph DB lives on a DIFFERENT Lakebase Autoscaling
+# project / branch / Postgres database than the registry.  Leave empty
+# to reuse the registry bootstrap values (same project, branch, and DB).
+DEFAULT_LAKEBASE_GRAPH_PROJECT=""    # empty = same as LAKEBASE_PROJECT
+DEFAULT_LAKEBASE_GRAPH_BRANCH=""     # empty = same as LAKEBASE_BRANCH
+DEFAULT_LAKEBASE_GRAPH_DATABASE=""   # empty = same as LAKEBASE_BOOTSTRAP_DATABASE
 
 # 4. app.yaml runtime fallbacks
 DEFAULT_APP_SQL_WAREHOUSE_FALLBACK="66e8366e84d57752"
@@ -149,6 +157,20 @@ export LAKEBASE_BOOTSTRAP_INSTANCE="${LAKEBASE_BOOTSTRAP_INSTANCE:-$LAKEBASE_PRO
 export LAKEBASE_BOOTSTRAP_BRANCH="${LAKEBASE_BOOTSTRAP_BRANCH:-$LAKEBASE_BRANCH}"
 export LAKEBASE_BOOTSTRAP_DATABASE="${LAKEBASE_BOOTSTRAP_DATABASE:-$DEFAULT_LAKEBASE_BOOTSTRAP_DATABASE}"
 export LAKEBASE_BOOTSTRAP_SCHEMA="${LAKEBASE_BOOTSTRAP_SCHEMA:-$LAKEBASE_REGISTRY_SCHEMA}"
+
+# Graph DB bootstrap — fall back to registry values when not explicitly set.
+# Override these when the Graph DB is bound to a separate Lakebase project.
+export LAKEBASE_GRAPH_PROJECT="${LAKEBASE_GRAPH_PROJECT:-$DEFAULT_LAKEBASE_GRAPH_PROJECT}"
+export LAKEBASE_GRAPH_BRANCH="${LAKEBASE_GRAPH_BRANCH:-$DEFAULT_LAKEBASE_GRAPH_BRANCH}"
+export LAKEBASE_GRAPH_DATABASE="${LAKEBASE_GRAPH_DATABASE:-$DEFAULT_LAKEBASE_GRAPH_DATABASE}"
+# Triple-table schema (Postgres graph schema) — where companion + graph tables live.
+export LAKEBASE_GRAPH_SCHEMA="${LAKEBASE_GRAPH_SCHEMA:-ontobricks_graph}"
+# Sync-table Postgres schema created by Lakebase to mirror the UC registry namespace.
+# Defaults to the registry catalog schema (LAKEBASE_REGISTRY_SCHEMA equivalent in the
+# graph DB).  Override if your UC registry schema segment differs from the registry
+# Postgres schema name.  Set to "" to skip the sync-schema grant (not needed when
+# sync_mode = app_managed).
+export LAKEBASE_SYNC_SCHEMA="${LAKEBASE_SYNC_SCHEMA:-}"
 
 # ── 4. app.yaml runtime fallbacks ───────────────────────────────────
 # Templated into `app.yaml` from `app.yaml.template` at deploy time.

@@ -495,8 +495,6 @@ async def dt_build(
     ontology_config = domain.ontology
 
     snap = DomainSnapshot(domain)
-    force_full = body.build_mode == "full" or body.drop_existing
-    stored_source_versions = dict(domain.source_versions or {})
     delta_cfg = domain.delta or {}
 
     tm = get_task_manager()
@@ -505,11 +503,8 @@ async def dt_build(
         task_type="triplestore_sync",
         steps=[
             {"name": "prepare", "description": "Preparing"},
-            {"name": "gate", "description": "Checking source tables"},
             {"name": "view", "description": "Creating VIEW"},
-            {"name": "diff", "description": "Computing diff"},
             {"name": "graph", "description": "Applying to graph"},
-            {"name": "snapshot", "description": "Refreshing snapshot"},
         ],
     )
 
@@ -529,10 +524,7 @@ async def dt_build(
             base_uri,
             mapping_config,
             ontology_config,
-            stored_source_versions,
             delta_cfg,
-            force_full,
-            snapshot_version=snap.current_version,
             build_kind="api",
         )
 

@@ -365,9 +365,6 @@ class HomeService:
             "registry_lbug_exists": dt_existence.get("registry_lbug_exists"),
             "registry_lbug_path": dt_existence.get("registry_lbug_path", ""),
             "registry_check_error": dt_existence.get("registry_check_error"),
-            "snapshot_table": dt_existence.get("snapshot_table", ""),
-            "snapshot_exists": dt_existence.get("snapshot_exists"),
-            "snapshot_check_error": dt_existence.get("snapshot_check_error"),
             "graph_engine": dt_existence.get("graph_engine", "ladybug"),
             "registry_archive_applicable": dt_existence.get(
                 "registry_archive_applicable", True

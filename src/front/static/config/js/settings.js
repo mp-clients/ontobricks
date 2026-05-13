@@ -383,103 +383,302 @@ document.addEventListener('DOMContentLoaded', function () {
         }
     }
 
-    async function loadLakebaseGraphDatabasesForGraphEngine() {
-        const sel = document.getElementById('lakebaseGraphDb');
-        const help = document.getElementById('lakebaseGraphDbHelp');
-        const ta = document.getElementById('graphEngineConfig');
+    // ── helpers ──────────────────────────────────────────────────────────────
+
+    function _setSelectLoading(sel, msg) {
         if (!sel) return;
+        sel.innerHTML = '<option value="">' + escapeHtmlSettings(msg) + '</option>';
         sel.disabled = true;
-        sel.innerHTML = '<option value="">Loading databases…</option>';
-        let cfgDb = '';
+    }
+
+    function _setSelectError(sel, msg) {
+        if (!sel) return;
+        sel.innerHTML = '<option value="">' + escapeHtmlSettings(msg) + '</option>';
+        sel.disabled = false;
+    }
+
+    function _getCurrentSchemaValue() {
+        const schSel = document.getElementById('lakebaseGraphSchema');
+        const schIn  = document.getElementById('lakebaseGraphSchemaInput');
+        const btn    = document.getElementById('btnToggleLakebaseSchemaInput');
+        if (btn && btn.dataset.mode === 'input') {
+            return (schIn ? schIn.value : '').trim() || 'ontobricks_graph';
+        }
+        return (schSel ? schSel.value : '').trim() || 'ontobricks_graph';
+    }
+
+    // ── cascading pickers ─────────────────────────────────────────────────────
+
+    async function loadLakebaseProjects() {
+        const projSel   = document.getElementById('lakebaseProject');
+        const branchSel = document.getElementById('lakebaseBranch');
+        const dbSel     = document.getElementById('lakebaseGraphDb');
+        const schSel    = document.getElementById('lakebaseGraphSchema');
+        const btn       = document.getElementById('btnLoadLakebaseProjects');
+        const help      = document.getElementById('lakebaseProjectHelp');
+        if (!projSel) return;
+
+        _setSelectLoading(projSel, 'Loading projects…');
+        if (btn) btn.disabled = true;
+
+        // read current configured values to restore selection after reload
+        let cfgDb = '', cfgProject = '', cfgBranch = '';
         try {
-            const o = JSON.parse(ta?.value || '{}');
-            if (o && typeof o.database === 'string') cfgDb = o.database;
-        } catch (_) { /* ignore */ }
+            const o = JSON.parse(document.getElementById('graphEngineConfig')?.value || '{}');
+            cfgDb      = o.database || '';
+            cfgProject = o.lakebase_project || '';
+            cfgBranch  = o.lakebase_branch  || '';
+        } catch (_) {}
+
         try {
-            const resp = await fetch('/settings/registry/lakebase-databases', { credentials: 'same-origin' });
-            const data = await resp.json();
-            if (!data.success) {
-                sel.innerHTML = '<option value="">(default — use bound database)</option>';
-                if (help) help.innerHTML = '<i class="bi bi-exclamation-triangle text-warning me-1"></i>'
-                    + escapeHtmlSettings(data.message || 'Could not list databases.');
-                if (cfgDb) {
-                    const opt = document.createElement('option');
-                    opt.value = cfgDb;
-                    opt.textContent = cfgDb + ' (configured)';
-                    opt.selected = true;
-                    sel.appendChild(opt);
-                }
-                sel.disabled = false;
+            const resp = await fetch('/settings/graph-engine/lakebase-projects', { credentials: 'same-origin' });
+            const data = resp.ok ? await resp.json() : {};
+            if (!data.success || !data.projects.length) {
+                _setSelectError(projSel, '(no projects found — check workspace auth)');
+                if (help) help.textContent = data.message || 'Could not list projects.';
                 return;
             }
-            const bound = data.bound_database || '';
-            const dbs = Array.isArray(data.databases) ? data.databases : [];
-            sel.innerHTML = '';
-            const defOpt = document.createElement('option');
-            defOpt.value = '';
-            defOpt.textContent = '(default — bound database' + (bound ? ': ' + bound : '') + ')';
-            sel.appendChild(defOpt);
-            for (const db of dbs) {
+            projSel.innerHTML = '<option value="">(select a project)</option>';
+            let matched = false;
+            for (const p of data.projects) {
                 const opt = document.createElement('option');
-                opt.value = db.name;
-                let label = db.name;
-                if (db.is_bound) label += ' (bound)';
-                if (!db.connectable) label += ' — no CONNECT';
-                opt.textContent = label;
-                if (!db.connectable) opt.disabled = true;
-                if (db.name === cfgDb) opt.selected = true;
-                sel.appendChild(opt);
+                opt.value = p.name;
+                opt.textContent = p.short_name + (p.state ? ' — ' + p.state : '');
+                if (p.name === cfgProject || p.short_name === cfgProject) {
+                    opt.selected = true;
+                    matched = true;
+                }
+                projSel.appendChild(opt);
             }
-            if (!cfgDb) defOpt.selected = true;
-            sel.disabled = false;
-            if (help) help.innerHTML = 'Same discovery API as Registry → Lakebase database picker.';
+            projSel.disabled = false;
+            if (help) help.textContent = data.projects.length + ' project(s) found.';
+
+            if (matched && projSel.value) {
+                await loadLakebaseBranches(projSel.value, cfgBranch, cfgDb);
+            }
         } catch (e) {
-            sel.innerHTML = '<option value="">(default)</option>';
-            sel.disabled = false;
-            if (help) help.innerHTML = '<i class="bi bi-x-circle text-danger me-1"></i>'
-                + escapeHtmlSettings(e.message || 'Network error');
+            _setSelectError(projSel, '(error — ' + (e.message || 'network') + ')');
+        } finally {
+            if (btn) btn.disabled = false;
         }
     }
 
+    async function loadLakebaseBranches(projectPath, cfgBranch, cfgDb) {
+        const branchSel = document.getElementById('lakebaseBranch');
+        const help      = document.getElementById('lakebaseBranchHelp');
+        if (!branchSel || !projectPath) return;
+
+        _setSelectLoading(branchSel, 'Loading branches…');
+
+        try {
+            const resp = await fetch(
+                '/settings/graph-engine/lakebase-branches?project=' + encodeURIComponent(projectPath),
+                { credentials: 'same-origin' }
+            );
+            const data = resp.ok ? await resp.json() : {};
+            if (!data.success || !data.branches.length) {
+                _setSelectError(branchSel, '(no branches found)');
+                if (help) help.textContent = data.message || 'No branches.';
+                return;
+            }
+            branchSel.innerHTML = '<option value="">(select a branch)</option>';
+            let matched = false;
+            for (const b of data.branches) {
+                const opt = document.createElement('option');
+                opt.value = b.name;
+                opt.textContent = b.short_name + (b.state ? ' — ' + b.state : '');
+                if (b.name === cfgBranch || b.short_name === cfgBranch) {
+                    opt.selected = true;
+                    matched = true;
+                }
+                branchSel.appendChild(opt);
+            }
+            branchSel.disabled = false;
+            if (help) help.textContent = data.branches.length + ' branch(es) found.';
+
+            if (matched && branchSel.value) {
+                await loadLakebasePgDatabases(branchSel.value, cfgDb);
+            }
+        } catch (e) {
+            _setSelectError(branchSel, '(error — ' + (e.message || 'network') + ')');
+        }
+    }
+
+    async function loadLakebasePgDatabases(branchPath, cfgDb) {
+        const dbSel  = document.getElementById('lakebaseGraphDb');
+        const schSel = document.getElementById('lakebaseGraphSchema');
+        const help   = document.getElementById('lakebaseGraphDbHelp');
+        if (!dbSel || !branchPath) return;
+
+        _setSelectLoading(dbSel, 'Loading databases…');
+        _setSelectLoading(schSel, '(select a database first)');
+
+        // read current schema from config textarea so we can restore it
+        let cfgSchema = 'ontobricks_graph';
+        try {
+            const o = JSON.parse(document.getElementById('graphEngineConfig')?.value || '{}');
+            if (o.schema) cfgSchema = o.schema;
+        } catch (_) {}
+
+        try {
+            const resp = await fetch(
+                '/settings/graph-engine/lakebase-pg-databases?branch=' + encodeURIComponent(branchPath),
+                { credentials: 'same-origin' }
+            );
+            const data = resp.ok ? await resp.json() : {};
+            if (!data.success || !data.databases.length) {
+                _setSelectError(dbSel, '(no databases found)');
+                if (help) help.textContent = data.message || 'No databases on this branch.';
+                return;
+            }
+            dbSel.innerHTML = '<option value="">(default — bound database)</option>';
+            let matched = false;
+            for (const name of data.databases) {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                if (name === cfgDb) { opt.selected = true; matched = true; }
+                dbSel.appendChild(opt);
+            }
+            dbSel.disabled = false;
+            if (help) help.textContent = data.databases.length + ' database(s) found.';
+
+            if (matched && dbSel.value) {
+                await loadLakebasePgSchemas(dbSel.value, cfgSchema);
+            }
+        } catch (e) {
+            _setSelectError(dbSel, '(error — ' + (e.message || 'network') + ')');
+        }
+    }
+
+    async function loadLakebasePgSchemas(database, cfgSchema) {
+        const schSel = document.getElementById('lakebaseGraphSchema');
+        const schIn  = document.getElementById('lakebaseGraphSchemaInput');
+        const help   = document.getElementById('lakebaseGraphSchemaHelp');
+        if (!schSel || !database) return;
+
+        _setSelectLoading(schSel, 'Loading schemas…');
+
+        try {
+            const resp = await fetch(
+                '/settings/graph-engine/lakebase-pg-schemas?database=' + encodeURIComponent(database),
+                { credentials: 'same-origin' }
+            );
+            const data = resp.ok ? await resp.json() : {};
+            if (!data.success || !data.schemas.length) {
+                _setSelectError(schSel, '(no schemas — ' + (data.message || 'empty database') + ')');
+                if (help) help.textContent = 'No schemas found. Use the pencil to type one manually.';
+                return;
+            }
+            schSel.innerHTML = '<option value="">(default — ontobricks_graph)</option>';
+            let matched = false;
+            for (const name of data.schemas) {
+                const opt = document.createElement('option');
+                opt.value = name;
+                opt.textContent = name;
+                if (name === cfgSchema) { opt.selected = true; matched = true; }
+                schSel.appendChild(opt);
+            }
+            schSel.disabled = false;
+            if (help) help.textContent = data.schemas.length + ' schema(s) found.';
+            if (!matched && cfgSchema) {
+                // schema configured but not listed (might not exist yet) — add as option
+                const opt = document.createElement('option');
+                opt.value = cfgSchema;
+                opt.textContent = cfgSchema + ' (configured)';
+                opt.selected = true;
+                schSel.appendChild(opt);
+            }
+            if (schIn) schIn.value = schSel.value || cfgSchema;
+        } catch (e) {
+            _setSelectError(schSel, '(error — ' + (e.message || 'network') + ')');
+        }
+        mergeLakebasePanelIntoConfigTextarea();
+    }
+
+    // ── schema toggle (select ↔ manual input) ────────────────────────────────
+
+    function _initSchemaToggle() {
+        const btn   = document.getElementById('btnToggleLakebaseSchemaInput');
+        const schSel = document.getElementById('lakebaseGraphSchema');
+        const schIn  = document.getElementById('lakebaseGraphSchemaInput');
+        if (!btn || !schSel || !schIn) return;
+
+        btn.addEventListener('click', function () {
+            const isSelect = btn.dataset.mode === 'select';
+            if (isSelect) {
+                // switch to manual input
+                schSel.classList.add('d-none');
+                schIn.classList.remove('d-none');
+                schIn.value = schSel.value || 'ontobricks_graph';
+                btn.dataset.mode = 'input';
+                btn.title = 'Use dropdown';
+                btn.innerHTML = '<i class="bi bi-list"></i>';
+            } else {
+                // switch back to select
+                schIn.classList.add('d-none');
+                schSel.classList.remove('d-none');
+                btn.dataset.mode = 'select';
+                btn.title = 'Type schema name manually';
+                btn.innerHTML = '<i class="bi bi-pencil"></i>';
+            }
+            mergeLakebasePanelIntoConfigTextarea();
+        });
+
+        schIn.addEventListener('input', function () {
+            mergeLakebasePanelIntoConfigTextarea();
+            const ucSchDisplay = document.getElementById('lakebaseUcSchemaDisplay');
+            if (ucSchDisplay) ucSchDisplay.value = this.value || '';
+        });
+        schIn.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    }
+
+    // ── merge / apply ─────────────────────────────────────────────────────────
+
     /** Merge Lakebase form fields + optional managed-sync options into the JSON textarea. */
     function mergeLakebasePanelIntoConfigTextarea() {
-        const ta = document.getElementById('graphEngineConfig');
-        const dbSel = document.getElementById('lakebaseGraphDb');
-        const schIn = document.getElementById('lakebaseGraphSchema');
+        const ta         = document.getElementById('graphEngineConfig');
+        const dbSel      = document.getElementById('lakebaseGraphDb');
+        const projSel    = document.getElementById('lakebaseProject');
+        const branchSel  = document.getElementById('lakebaseBranch');
         const syncModeEl = document.getElementById('lakebaseSyncMode');
-        if (!ta || !dbSel || !schIn) return;
+        if (!ta || !dbSel) return;
         let o = {};
         try { o = JSON.parse(ta.value || '{}'); } catch (_) { o = {}; }
         if (typeof o !== 'object' || Array.isArray(o)) o = {};
-        o.database = dbSel.value || '';
-        o.schema = (schIn.value || 'ontobricks_graph').trim() || 'ontobricks_graph';
+
+        o.database          = dbSel.value || '';
+        o.schema            = _getCurrentSchemaValue();
+        o.lakebase_project  = (projSel   ? projSel.value   : '') || '';
+        o.lakebase_branch   = (branchSel ? branchSel.value : '') || '';
+
         const mode = (syncModeEl && syncModeEl.value === 'managed_synced') ? 'managed_synced' : 'app_managed';
         if (mode === 'managed_synced') {
             o.sync_mode = 'managed_synced';
-            const stEl = document.getElementById('lakebaseSyncTableMode');
+            const stEl   = document.getElementById('lakebaseSyncTableMode');
             const toutEl = document.getElementById('lakebaseSyncTimeout');
-            const ucEl = document.getElementById('lakebaseUcCatalog');
+            const ucCat  = document.getElementById('lakebaseUcCatalog');
             if (stEl) o.sync_table_mode = stEl.value || 'snapshot';
             if (toutEl) {
-                var n = parseInt(toutEl.value, 10);
+                const n = parseInt(toutEl.value, 10);
                 o.sync_timeout_s = (!isNaN(n) && n > 0) ? n : 600;
             }
-            if (ucEl) {
-                var cat = (ucEl.value || '').trim();
-                if (cat) o.sync_uc_catalog = cat;
-                else delete o.sync_uc_catalog;
-            }
+            const cat = (ucCat ? ucCat.value : '').trim();
+            if (cat) o.sync_uc_catalog = cat; else delete o.sync_uc_catalog;
+            // sync_uc_schema is always derived from the Postgres graph schema — never persisted
+            delete o.sync_uc_schema;
         } else {
             o.sync_mode = 'app_managed';
             delete o.sync_table_mode;
             delete o.sync_timeout_s;
             delete o.sync_uc_catalog;
+            delete o.sync_uc_schema;
         }
         ta.value = JSON.stringify(o, null, 2);
     }
 
     function toggleLakebaseManagedSyncPanel() {
-        const sm = document.getElementById('lakebaseSyncMode');
+        const sm    = document.getElementById('lakebaseSyncMode');
         const panel = document.getElementById('lakebaseManagedSyncPanel');
         if (!sm || !panel) return;
         panel.classList.toggle('d-none', sm.value !== 'managed_synced');
@@ -487,81 +686,81 @@ document.addEventListener('DOMContentLoaded', function () {
 
     function updateLakebaseSyncModeHelp() {
         const sm = document.getElementById('lakebaseSyncMode');
-        const v = sm && sm.value === 'managed_synced' ? 'managed_synced' : 'app_managed';
+        const v  = sm && sm.value === 'managed_synced' ? 'managed_synced' : 'app_managed';
         document.querySelectorAll('[data-lk-mode]').forEach(function (el) {
             el.classList.toggle('d-none', el.getAttribute('data-lk-mode') !== v);
         });
     }
 
+    // ── UC catalog + schema pickers ───────────────────────────────────────────
+
     async function loadUcCatalogsForGraphEngine() {
-        const dl = document.getElementById('lakebaseUcCatalogDatalist');
-        const msg = document.getElementById('lakebaseUcCatalogLoadMsg');
-        const btn = document.getElementById('btnLoadUcCatalogs');
-        if (!dl) return;
-        if (msg) {
-            msg.classList.remove('d-none');
-            msg.className = 'form-text small mt-1 text-muted';
-            msg.textContent = 'Loading catalogs…';
-        }
+        const catSel = document.getElementById('lakebaseUcCatalog');
+        const msg    = document.getElementById('lakebaseUcCatalogLoadMsg');
+        const btn    = document.getElementById('btnLoadUcCatalogs');
+        if (!catSel) return;
+        if (msg) { msg.classList.remove('d-none'); msg.className = 'form-text small mt-1 text-muted'; msg.textContent = 'Loading catalogs…'; }
         if (btn) btn.disabled = true;
+
+        let cfgCat = '';
+        try {
+            const o = JSON.parse(document.getElementById('graphEngineConfig')?.value || '{}');
+            cfgCat = o.sync_uc_catalog || '';
+        } catch (_) {}
+
         try {
             const resp = await fetch('/settings/graph-engine/uc-catalogs', { credentials: 'same-origin' });
             const data = resp.ok ? await resp.json() : {};
-            dl.innerHTML = '';
             if (data.success && Array.isArray(data.catalogs)) {
-                data.catalogs.forEach(function (name) {
+                catSel.innerHTML = '<option value="">(none — use Registry catalog)</option>';
+                let matched = false;
+                for (const name of data.catalogs) {
                     const opt = document.createElement('option');
                     opt.value = name;
-                    dl.appendChild(opt);
-                });
-                if (msg) {
-                    msg.className = 'form-text small mt-1 text-success';
-                    msg.textContent = 'Loaded ' + data.catalogs.length + ' catalog(s). Type or pick a value above.';
+                    opt.textContent = name;
+                    if (name === cfgCat) { opt.selected = true; matched = true; }
+                    catSel.appendChild(opt);
                 }
+                catSel.disabled = false;
+                if (msg) { msg.className = 'form-text small mt-1 text-success'; msg.textContent = data.catalogs.length + ' catalog(s) loaded.'; }
+                // no-op: UC schema is always derived from Postgres graph schema
             } else {
-                if (msg) {
-                    msg.className = 'form-text small mt-1 text-warning';
-                    msg.textContent = data.message || 'Could not list catalogs — type the catalog name manually.';
-                }
+                if (msg) { msg.className = 'form-text small mt-1 text-warning'; msg.textContent = data.message || 'Could not list catalogs.'; }
+                catSel.disabled = false;
             }
         } catch (e) {
-            if (msg) {
-                msg.className = 'form-text small mt-1 text-warning';
-                msg.textContent = e.message || 'Network error';
-            }
+            if (msg) { msg.className = 'form-text small mt-1 text-warning'; msg.textContent = e.message || 'Network error'; }
+            catSel.disabled = false;
         } finally {
             if (btn) btn.disabled = false;
         }
     }
 
     function applyLakebaseFormFromConfigTextarea() {
-        const ta = document.getElementById('graphEngineConfig');
-        const schIn = document.getElementById('lakebaseGraphSchema');
+        const ta         = document.getElementById('graphEngineConfig');
         const syncModeEl = document.getElementById('lakebaseSyncMode');
-        if (!ta || !schIn) return;
-        try {
-            const o = JSON.parse(ta.value || '{}');
-            if (o && typeof o.schema === 'string' && o.schema.trim()) {
-                schIn.value = o.schema.trim();
-            }
-            if (syncModeEl) {
-                syncModeEl.value = (o.sync_mode === 'managed_synced') ? 'managed_synced' : 'app_managed';
-            }
-            const stEl = document.getElementById('lakebaseSyncTableMode');
-            if (stEl && o.sync_table_mode && typeof o.sync_table_mode === 'string') {
-                stEl.value = o.sync_table_mode;
-            }
-            const toutEl = document.getElementById('lakebaseSyncTimeout');
-            if (toutEl && o.sync_timeout_s != null) {
-                toutEl.value = String(parseInt(o.sync_timeout_s, 10) || 600);
-            }
-            const ucEl = document.getElementById('lakebaseUcCatalog');
-            if (ucEl && o.sync_uc_catalog != null) {
-                ucEl.value = String(o.sync_uc_catalog);
-            } else if (ucEl) {
-                ucEl.value = '';
-            }
-        } catch (_) { /* ignore */ }
+        if (!ta) return;
+        let o = {};
+        try { o = JSON.parse(ta.value || '{}'); } catch (_) {}
+
+        if (syncModeEl) syncModeEl.value = (o.sync_mode === 'managed_synced') ? 'managed_synced' : 'app_managed';
+
+        const stEl   = document.getElementById('lakebaseSyncTableMode');
+        if (stEl && o.sync_table_mode) stEl.value = o.sync_table_mode;
+
+        const toutEl = document.getElementById('lakebaseSyncTimeout');
+        if (toutEl && o.sync_timeout_s != null) toutEl.value = String(parseInt(o.sync_timeout_s, 10) || 600);
+
+        // UC catalog — set value but don't reload options here (happens in loadUcCatalogsForGraphEngine)
+        const ucCat = document.getElementById('lakebaseUcCatalog');
+        if (ucCat && o.sync_uc_catalog != null) ucCat.value = String(o.sync_uc_catalog);
+
+        // schema input mirror + UC schema display (always mirrors Postgres graph schema)
+        const schIn = document.getElementById('lakebaseGraphSchemaInput');
+        if (schIn && o.schema) schIn.value = o.schema;
+        const ucSchDisplay = document.getElementById('lakebaseUcSchemaDisplay');
+        if (ucSchDisplay) ucSchDisplay.value = o.schema || '';
+
         toggleLakebaseManagedSyncPanel();
         updateLakebaseSyncModeHelp();
     }
@@ -619,20 +818,23 @@ document.addEventListener('DOMContentLoaded', function () {
     let ladybugFilesLoaded = false;
 
     function setGraphDbTabLoading(loading) {
-        const banner = document.getElementById('graphDbTabLoadingBanner');
-        if (!banner) return;
-        banner.classList.toggle('d-none', !loading);
-        banner.classList.toggle('d-flex', loading);
+        const banner  = document.getElementById('graphDbTabLoadingBanner');
+        const content = document.getElementById('graphDbTabContent');
+        if (banner) {
+            banner.classList.toggle('d-none', !loading);
+            banner.classList.toggle('d-flex', loading);
+        }
+        if (content) content.classList.toggle('d-none', loading);
     }
 
     /** Reload engine + JSON from server so the tab matches persisted settings after every visit. */
     async function refreshGraphDbTabFromServer() {
         const sel = document.getElementById('graphEngineSelect');
-        const ta = document.getElementById('graphEngineConfig');
+        const ta  = document.getElementById('graphEngineConfig');
         if (!sel || !ta) return;
         try {
             const [engResp, cfgResp] = await Promise.all([
-                fetch('/settings/graph-engine', { credentials: 'same-origin' }),
+                fetch('/settings/graph-engine',        { credentials: 'same-origin' }),
                 fetch('/settings/graph-engine-config', { credentials: 'same-origin' }),
             ]);
             const engData = engResp.ok ? await engResp.json() : {};
@@ -642,7 +844,7 @@ document.addEventListener('DOMContentLoaded', function () {
             }
             const rawEng = engData.graph_engine;
             if (engData.success && rawEng && typeof rawEng === 'string') {
-                var allowed = Array.isArray(engData.allowed_engines) ? engData.allowed_engines : [];
+                const allowed = Array.isArray(engData.allowed_engines) ? engData.allowed_engines : [];
                 if (allowed.length === 0 && (rawEng === 'ladybug' || rawEng === 'lakebase')) {
                     sel.value = rawEng;
                 } else if (allowed.indexOf(rawEng) >= 0) {
@@ -653,8 +855,14 @@ document.addEventListener('DOMContentLoaded', function () {
             }
             applyLakebaseFormFromConfigTextarea();
             if (sel.value === 'lakebase') {
-                await loadLakebaseGraphDatabasesForGraphEngine();
+                // auto-load the cascading chain if a project is already configured
+                await loadLakebaseProjects();
                 await loadLakebaseGraphHealth();
+                // restore UC catalog/schema dropdowns when managed_synced was persisted
+                const syncModeEl = document.getElementById('lakebaseSyncMode');
+                if (syncModeEl && syncModeEl.value === 'managed_synced') {
+                    await loadUcCatalogsForGraphEngine();
+                }
             }
         } catch (e) {
             console.log('Graph DB tab refresh failed', e);
@@ -667,29 +875,62 @@ document.addEventListener('DOMContentLoaded', function () {
         applyGraphDbEnginePanels();
         if (this.value === 'lakebase') {
             applyLakebaseFormFromConfigTextarea();
-            await loadLakebaseGraphDatabasesForGraphEngine();
+            await loadLakebaseProjects();
             await loadLakebaseGraphHealth();
         } else if (this.value === 'ladybug' && !ladybugFilesLoaded) {
             loadLadybugFiles();
         }
     });
 
-    document.getElementById('lakebaseGraphDb')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
-    document.getElementById('lakebaseGraphSchema')?.addEventListener('input', mergeLakebasePanelIntoConfigTextarea);
-    document.getElementById('lakebaseGraphSchema')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+    // cascading project → branch → database → schema
+    document.getElementById('btnLoadLakebaseProjects')?.addEventListener('click', () => loadLakebaseProjects());
+    document.getElementById('lakebaseProject')?.addEventListener('change', async function () {
+        const branchSel = document.getElementById('lakebaseBranch');
+        const dbSel     = document.getElementById('lakebaseGraphDb');
+        const schSel    = document.getElementById('lakebaseGraphSchema');
+        _setSelectLoading(branchSel, '(select a project first)');
+        _setSelectLoading(dbSel,     '(select a branch first)');
+        _setSelectLoading(schSel,    '(select a database first)');
+        mergeLakebasePanelIntoConfigTextarea();
+        if (this.value) await loadLakebaseBranches(this.value, '', '');
+    });
+    document.getElementById('lakebaseBranch')?.addEventListener('change', async function () {
+        const dbSel  = document.getElementById('lakebaseGraphDb');
+        const schSel = document.getElementById('lakebaseGraphSchema');
+        _setSelectLoading(dbSel,  '(select a branch first)');
+        _setSelectLoading(schSel, '(select a database first)');
+        mergeLakebasePanelIntoConfigTextarea();
+        if (this.value) await loadLakebasePgDatabases(this.value, '');
+    });
+    document.getElementById('lakebaseGraphDb')?.addEventListener('change', async function () {
+        const schSel = document.getElementById('lakebaseGraphSchema');
+        _setSelectLoading(schSel, '(select a database first)');
+        mergeLakebasePanelIntoConfigTextarea();
+        if (this.value) await loadLakebasePgSchemas(this.value, _getCurrentSchemaValue());
+    });
+    document.getElementById('lakebaseGraphSchema')?.addEventListener('change', function () {
+        mergeLakebasePanelIntoConfigTextarea();
+        const ucSchDisplay = document.getElementById('lakebaseUcSchemaDisplay');
+        if (ucSchDisplay) ucSchDisplay.value = this.value || '';
+    });
+
+    // managed-sync options
     document.getElementById('lakebaseSyncMode')?.addEventListener('change', function () {
         toggleLakebaseManagedSyncPanel();
         updateLakebaseSyncModeHelp();
         mergeLakebasePanelIntoConfigTextarea();
     });
     document.getElementById('lakebaseSyncTableMode')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
-    document.getElementById('lakebaseSyncTimeout')?.addEventListener('input', mergeLakebasePanelIntoConfigTextarea);
+    document.getElementById('lakebaseSyncTimeout')?.addEventListener('input',  mergeLakebasePanelIntoConfigTextarea);
     document.getElementById('lakebaseSyncTimeout')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
-    document.getElementById('lakebaseUcCatalog')?.addEventListener('input', mergeLakebasePanelIntoConfigTextarea);
-    document.getElementById('lakebaseUcCatalog')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
+
+    // UC catalog change
     document.getElementById('btnLoadUcCatalogs')?.addEventListener('click', () => loadUcCatalogsForGraphEngine());
+    document.getElementById('lakebaseUcCatalog')?.addEventListener('change', mergeLakebasePanelIntoConfigTextarea);
 
     document.getElementById('btnRefreshLakebaseGraphHealth')?.addEventListener('click', () => loadLakebaseGraphHealth());
+
+    _initSchemaToggle();
 
     /** Persist graph engine and JSON config (used by global Save). */
     async function saveGraphDbSettings(errors) {

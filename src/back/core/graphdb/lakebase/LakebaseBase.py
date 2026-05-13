@@ -46,6 +46,9 @@ def validate_engine_config_keys(config: Dict[str, Any]) -> Tuple[bool, str]:
     * ``sync_timeout_s``   -- positive integer; how long to wait for a sync run.
     * ``sync_uc_catalog``  -- UC catalog where the synced table is registered;
       defaults to the snapshot Delta catalog used by the build pipeline.
+    * ``sync_uc_schema``   -- UC schema within ``sync_uc_catalog`` for synced table
+      registration; defaults to the Registry Volume schema when set, otherwise the
+      graph Postgres schema name.
 
     Unknown keys pass through silently so admin-only feature flags can be
     layered on without forcing a schema migration.
@@ -87,6 +90,9 @@ def validate_engine_config_keys(config: Dict[str, Any]) -> Tuple[bool, str]:
     sync_uc_catalog = config.get("sync_uc_catalog", None)
     if sync_uc_catalog is not None and not isinstance(sync_uc_catalog, str):
         return False, "graph_engine_config.sync_uc_catalog must be a string"
+    sync_uc_schema = config.get("sync_uc_schema", None)
+    if sync_uc_schema is not None and not isinstance(sync_uc_schema, str):
+        return False, "graph_engine_config.sync_uc_schema must be a string"
     return True, ""
 
 

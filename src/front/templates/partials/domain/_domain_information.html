@@ -178,27 +178,6 @@
                             </small>
                         </div>
 
-                        <!-- Incremental Snapshot (read-only, derived) -->
-                        <div class="mb-4">
-                            <label class="form-label fw-semibold">
-                                <i class="bi bi-clock-history me-1"></i> Incremental Snapshot <small class="text-muted">(Delta table)</small>
-                            </label>
-                            <div class="input-group">
-                                <span class="input-group-text bg-light"><i class="bi bi-table"></i></span>
-                                <input type="text" class="form-control font-monospace" id="domainSnapshotTableName"
-                                       value="{{ domain.snapshot_table or '' }}"
-                                       readonly
-                                       style="background-color: #e9ecef;"
-                                       placeholder="Configure the registry in Settings first">
-                            </div>
-                            <small class="text-muted">
-                                <i class="bi bi-info-circle me-1"></i>A managed Delta table that stores the triple set from the previous build.
-                                Used by <strong>incremental sync</strong> to compute the diff (SQL <code>EXCEPT</code>) and apply only
-                                additions and removals to the graph, instead of rebuilding from scratch.
-                                Automatically created on the first build.
-                            </small>
-                        </div>
-
                         <!-- Graph Database info (read-only, computed) -->
                         <div class="mb-3">
                             <label class="form-label fw-semibold">

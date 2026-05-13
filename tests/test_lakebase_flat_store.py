@@ -297,10 +297,22 @@ class TestManagedSyncedRouting:
         assert synced_store._readable_table_id("G_V1") == "g_v1"
 
     def test_synced_uc_name_uses_engine_config_catalog(self, synced_store):
+        # No sync_uc_schema set → falls back to pg schema
         assert (
             synced_store.synced_uc_name("G_V1")
             == "catX.ontobricks_graph.g_v1_sync"
         )
+
+    def test_synced_uc_name_uses_sync_uc_schema_when_set(self, auth):
+        store = LakebaseFlatStore(
+            auth,
+            schema="ontobricks_graph",
+            sync_mode="managed_synced",
+            sync_uc_catalog="catX",
+            sync_uc_schema="ontobricks",
+            synced_manager=MagicMock(),
+        )
+        assert store.synced_uc_name("G_V1") == "catX.ontobricks.g_v1_sync"
 
     def test_synced_uc_name_falls_back_to_caller_catalog(self, auth):
         store = LakebaseFlatStore(
@@ -399,9 +411,11 @@ class TestManagedSyncedRouting:
         executed = [str(c[0][0]) for c in cur.execute.call_args_list]
         assert any("DROP VIEW IF EXISTS g_v1" in s for s in executed)
         assert any("DROP TABLE IF EXISTS g_v1__app" in s for s in executed)
+        # synced_store has no sync_uc_schema, falls back to pg schema
         synced_store._synced_manager.delete.assert_called_once_with(
             "catX.ontobricks_graph.g_v1_sync", purge_data=True
         )
+
 
     def test_ensure_synced_layout_creates_companion_and_view(self, synced_store):
         cur = MagicMock()
@@ -415,6 +429,35 @@ class TestManagedSyncedRouting:
             and "FROM g_v1__app" in s
             for s in executed
         )
+
+
+    def test_ensure_synced_union_view_qualifies_sync_table_when_schemas_differ(self, auth):
+        """When sync_uc_schema != pg schema, the _sync reference is schema-qualified."""
+        store = LakebaseFlatStore(
+            auth,
+            schema="ontobricks_graph",
+            sync_mode="managed_synced",
+            sync_uc_catalog="catX",
+            sync_uc_schema="ontobricks",
+            synced_manager=MagicMock(),
+        )
+        cur = MagicMock()
+        with patch.object(store, "_cursor", _cursor_ctx(cur)):
+            store.ensure_synced_union_view("G_V1")
+        executed = [str(c[0][0]) for c in cur.execute.call_args_list]
+        view_ddl = next(s for s in executed if "CREATE OR REPLACE VIEW" in s)
+        assert '"ontobricks".g_v1_sync' in view_ddl
+        assert "FROM g_v1__app" in view_ddl
+
+    def test_ensure_synced_union_view_unqualified_when_schemas_same(self, synced_store):
+        """When sync_uc_schema matches pg schema, the _sync reference is unqualified."""
+        cur = MagicMock()
+        with patch.object(synced_store, "_cursor", _cursor_ctx(cur)):
+            synced_store.ensure_synced_union_view("G_V1")
+        executed = [str(c[0][0]) for c in cur.execute.call_args_list]
+        view_ddl = next(s for s in executed if "CREATE OR REPLACE VIEW" in s)
+        assert "FROM g_v1_sync" in view_ddl
+        assert '"ontobricks_graph"' not in view_ddl
 
     def test_ensure_synced_companion_skips_union_view(self, synced_store):
         cur = MagicMock()
@@ -433,7 +476,8 @@ class TestManagedSyncedRouting:
 
 
 class TestResolveLakebaseGraphSchema:
-    def test_prefers_registry_volume_schema(self):
+    def test_explicit_config_schema_wins_over_registry(self):
+        """Explicit graph_engine_config.schema always overrides the registry volume schema."""
         from types import SimpleNamespace
 
         from back.core.graphdb.lakebase.LakebaseFlatStore import (
@@ -449,8 +493,25 @@ class TestResolveLakebaseGraphSchema:
             out = resolve_lakebase_graph_schema(
                 domain,
                 settings,
-                "ontobricks_graph",
+                "ontobricks_graph",  # explicit
             )
+        assert out == "ontobricks_graph"
+
+    def test_falls_back_to_registry_when_config_schema_empty(self):
+        """When config schema is empty, the registry volume schema is used."""
+        from types import SimpleNamespace
+
+        from back.core.graphdb.lakebase.LakebaseFlatStore import (
+            resolve_lakebase_graph_schema,
+        )
+
+        domain = SimpleNamespace(settings={"registry": {}})
+        settings = SimpleNamespace()
+        with patch(
+            "back.objects.registry.RegistryCfg.from_domain",
+            return_value=MagicMock(catalog="c", schema="volume_sch", volume="v"),
+        ):
+            out = resolve_lakebase_graph_schema(domain, settings, "")
         assert out == "volume_sch"
 
     def test_falls_back_when_registry_schema_empty(self):

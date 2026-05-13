@@ -449,39 +449,30 @@ function updateDtwinCard(data) {
         }
     }
 
-    // Snapshot
-    var snapshotArea = document.getElementById('psDtSnapshotArea');
-    if (snapshotArea && dt.snapshot_table) {
-        snapshotArea.style.display = '';
-        var snapshotName = document.getElementById('psDtSnapshotName');
-        if (snapshotName) snapshotName.textContent = dt.snapshot_table;
-        var snapshotBadge = document.getElementById('psDtExistSnapshot');
-        if (snapshotBadge) snapshotBadge.innerHTML = _dtBadge(dt.snapshot_exists, 'Exists', 'Not created', 'N/A');
-    } else if (snapshotArea) {
-        snapshotArea.style.display = 'none';
-    }
-
     // Graph DB card — labels depend on global graph engine (Ladybug vs Lakebase)
     var eng = dt.graph_engine || 'ladybug';
     var titleGraph = document.getElementById('psDtGraphBackendTitle');
     if (titleGraph) {
-        titleGraph.textContent = eng === 'lakebase' ? 'Graph DB (Postgres)' : 'Graph DB Digital Twin';
+        titleGraph.textContent = eng === 'lakebase' ? 'Graph DB (Lakebase)' : 'Graph DB Digital Twin';
     }
     var subGraph = document.getElementById('psDtGraphStorageSubtitle');
     if (subGraph) {
         subGraph.textContent = eng === 'lakebase'
-            ? 'Lakebase Postgres (flat triple table)'
+            ? 'UC Sync object'
             : 'Local graph database';
     }
     var regRowPs = document.getElementById('psDtRegistryArchiveRow');
-    if (regRowPs) {
-        regRowPs.style.display = eng === 'lakebase' ? 'none' : '';
-    }
+    if (regRowPs) regRowPs.classList.toggle('d-none', eng === 'lakebase');
     var primaryCode = document.getElementById('psDtGraphPrimaryCode');
     if (primaryCode) {
-        if (eng === 'lakebase' && dt.local_lbug_path) {
-            primaryCode.textContent = dt.local_lbug_path;
-            primaryCode.style.display = '';
+        if (eng === 'lakebase') {
+            var ucFqn = dt.lakebase_synced_uc || (
+                dt.lakebase_database && dt.lakebase_table
+                    ? dt.lakebase_database + '.' + dt.lakebase_schema + '.' + dt.lakebase_table
+                    : ''
+            );
+            primaryCode.textContent = ucFqn;
+            primaryCode.style.display = ucFqn ? '' : 'none';
         } else {
             primaryCode.textContent = '';
             primaryCode.style.display = 'none';

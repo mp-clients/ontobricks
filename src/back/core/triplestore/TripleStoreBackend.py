@@ -340,13 +340,18 @@ class TripleStoreBackend(ABC):
     ) -> Set[str]:
         """Return distinct subjects matching type and/or value criteria.
 
-        *field* is ``"label"`` (match on ``rdfs:label``) or ``"id"`` (match on
-        the subject URI itself).  *match_type* is ``"contains"``, ``"exact"``,
-        ``"starts"``, or ``"ends"``. ``limit`` (when > 0) caps returned
-        subjects for responsive preview queries.
+        *field* is ``"label"`` (match on ``rdfs:label``), ``"id"`` (match on
+        the subject URI itself), or ``"any"`` (match either).
+        *match_type* is ``"contains"``, ``"exact"``, ``"starts"``, or
+        ``"ends"``. ``limit`` (when > 0) caps returned subjects for responsive
+        preview queries.
         """
         esc_type = self._sql_escape(entity_type) if entity_type else ""
         safe_val = self._sql_escape(value.lower()) if value else ""
+        rel = self._sql_relation(table_name)
+
+        search_label = field in ("label", "any")
+        search_id = field in ("id", "any")
 
         def _like(column: str) -> str:
             if match_type == "exact":
@@ -358,39 +363,45 @@ class TripleStoreBackend(ABC):
             return f"{column} LIKE '%{safe_val}%'"
 
         if entity_type and value:
-            if field == "id":
-                like = _like("LOWER(subject)")
-                sql = (
-                    f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
+            # Build a set of candidate subjects matching the text filter,
+            # then intersect with the typed subjects.
+            parts = []
+            if search_id:
+                parts.append(
+                    f"SELECT DISTINCT subject FROM {rel} "
                     f"WHERE predicate = '{RDF_TYPE}' AND object = '{esc_type}' "
-                    f"AND {like}"
+                    f"AND {_like('LOWER(subject)')}"
                 )
-            else:
-                like = _like("LOWER(object)")
-                sql = (
-                    f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
+            if search_label:
+                parts.append(
+                    f"SELECT DISTINCT subject FROM {rel} "
                     f"WHERE predicate = '{RDF_TYPE}' AND object = '{esc_type}' "
                     f"AND subject IN ("
-                    f"SELECT subject FROM {self._sql_relation(table_name)} "
-                    f"WHERE predicate = '{RDFS_LABEL}' AND {like})"
+                    f"SELECT subject FROM {rel} "
+                    f"WHERE predicate = '{RDFS_LABEL}' AND {_like('LOWER(object)')})"
                 )
+            sql = " UNION ".join(parts)
+
         elif entity_type:
             sql = (
-                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
+                f"SELECT DISTINCT subject FROM {rel} "
                 f"WHERE predicate = '{RDF_TYPE}' AND object = '{esc_type}'"
             )
-        elif field == "id":
-            like = _like("LOWER(subject)")
-            sql = (
-                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
-                f"WHERE predicate = '{RDF_TYPE}' AND {like}"
-            )
+
         else:
-            like = _like("LOWER(object)")
-            sql = (
-                f"SELECT DISTINCT subject FROM {self._sql_relation(table_name)} "
-                f"WHERE predicate = '{RDFS_LABEL}' AND {like}"
-            )
+            # value only — search by label and/or URI fragment
+            parts = []
+            if search_label:
+                parts.append(
+                    f"SELECT DISTINCT subject FROM {rel} "
+                    f"WHERE predicate = '{RDFS_LABEL}' AND {_like('LOWER(object)')}"
+                )
+            if search_id:
+                parts.append(
+                    f"SELECT DISTINCT subject FROM {rel} "
+                    f"WHERE predicate = '{RDF_TYPE}' AND {_like('LOWER(subject)')}"
+                )
+            sql = " UNION ".join(parts)
 
         rows = self.execute_query(sql)
         return {r["subject"] for r in rows}

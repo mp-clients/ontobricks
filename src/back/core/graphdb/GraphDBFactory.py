@@ -18,6 +18,7 @@ from shared.config.constants import DEFAULT_GRAPH_NAME, DEFAULT_LADYBUG_PATH
 logger = get_logger(__name__)
 
 
+
 class GraphDBFactory:
     """Construct graph DB backend instances from domain session configuration."""
 
@@ -179,7 +180,7 @@ class GraphDBFactory:
             return None
 
         cfg = engine_config or {}
-        schema_raw = cfg.get("schema") or DEFAULT_GRAPH_SCHEMA
+        schema_raw = (cfg.get("schema") or "").strip()
         database_override = str(cfg.get("database") or "").strip()
         sync_mode = str(cfg.get("sync_mode") or SYNC_MODE_APP).strip() or SYNC_MODE_APP
         if sync_mode not in (SYNC_MODE_APP, SYNC_MODE_MANAGED):
@@ -192,12 +193,21 @@ class GraphDBFactory:
         sync_table_mode = str(cfg.get("sync_table_mode") or "snapshot").strip() or "snapshot"
         sync_timeout_s = int(cfg.get("sync_timeout_s") or _SYNC_DEFAULT_TIMEOUT_S)
         sync_uc_catalog = str(cfg.get("sync_uc_catalog") or "").strip()
+        sync_uc_schema_override = str(cfg.get("sync_uc_schema") or "").strip()
 
         try:
             schema = resolve_lakebase_graph_schema(domain, settings, str(schema_raw))
         except ValueError as exc:
             logger.warning("Invalid lakebase graph schema: %s", exc)
             return None
+
+        # UC schema segment for the synced-table FQN.
+        # Priority:
+        #   1. Explicit graph_engine_config.sync_uc_schema (user override via Settings UI)
+        #   2. Postgres graph schema — Lakebase places the _sync foreign table in the
+        #      Postgres schema that matches this UC segment, so it must equal the graph
+        #      schema where all other graph tables live.
+        sync_uc_schema = sync_uc_schema_override or schema
 
         try:
             auth = get_lakebase_auth()
@@ -232,6 +242,7 @@ class GraphDBFactory:
                 sync_table_mode=sync_table_mode,
                 sync_timeout_s=sync_timeout_s,
                 sync_uc_catalog=sync_uc_catalog,
+                sync_uc_schema=sync_uc_schema,
                 synced_manager=synced_manager,
             )
         except Exception as e:

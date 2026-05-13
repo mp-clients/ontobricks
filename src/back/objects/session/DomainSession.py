@@ -866,31 +866,6 @@ class DomainSession:
         self._data["domain"]["last_build"] = value
 
     @property
-    def snapshot_table(self) -> str:
-        """Fully-qualified name of the incremental-sync snapshot Delta table (computed)."""
-        from back.core.triplestore.IncrementalBuildService import (
-            IncrementalBuildService,
-        )
-
-        delta = self.delta
-        if not delta.get("catalog") or not delta.get("schema"):
-            return ""
-        return IncrementalBuildService.snapshot_table_name(
-            self.info.get("name", DEFAULT_GRAPH_NAME),
-            delta,
-            version=self.current_version,
-        )
-
-    @property
-    def source_versions(self) -> Dict[str, Any]:
-        """Source Delta table versions recorded at the last successful build."""
-        return self._data["domain"].get("triplestore", {}).get("source_versions", {})
-
-    @source_versions.setter
-    def source_versions(self, value: Dict[str, Any]):
-        self._data["domain"].setdefault("triplestore", {})["source_versions"] = value
-
-    @property
     def ontology_changed(self) -> bool:
         """Whether the ontology has been modified since the last project save."""
         return self._data["domain"].get("ontology_changed", False)

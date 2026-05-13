@@ -7,6 +7,21 @@ in the FastAPI process.
 
 The full architecture is described in
 :doc:`/graphdb-integration` (Lakebase managed-synced section).
+
+SDK compatibility
+-----------------
+``databricks.sdk.service.database`` is a relatively new module that may be
+absent from the SDK version bundled into a Databricks Apps container.  When
+the module is missing the manager falls back to:
+
+* **REST calls** — direct ``requests`` calls to
+  ``/api/2.0/database/synced_tables/…`` authenticated with
+  ``DATABRICKS_TOKEN`` / ``DATABRICKS_HOST`` (auto-injected by Apps).
+* **Plain-dict payloads** — synced-table specs are built as ``dict``
+  objects rather than SDK dataclasses.
+* **``_DictNamespace`` responses** — API responses are wrapped in a
+  simple attribute-access shim so the same ``getattr``-based helpers
+  (``_extract_state``, ``_extract_pipeline_id``) work for both paths.
 """
 
 from __future__ import annotations
@@ -23,11 +38,11 @@ logger = get_logger(__name__)
 DEFAULT_TIMEOUT_S = 600
 _POLL_INTERVAL_S = 5
 
-# Treat ``ONLINE`` as the canonical success state. ``ONLINE_NO_PENDING_UPDATE``
-# is the steady state once the initial sync completes; ``ONLINE_TRIGGERED_UPDATE``
-# means a refresh is in progress so we keep polling.
+# State names are normalised by ``_extract_state`` — the ``SYNCED_TABLE_``
+# SDK prefix is stripped, and the SDK typo ``SYNCED_TABLED_OFFLINE`` becomes
+# ``TABLED_OFFLINE`` (included in _TERMINAL_FAIL below).
 _TERMINAL_OK = {"ONLINE", "ONLINE_NO_PENDING_UPDATE"}
-_TERMINAL_FAIL = {"FAILED", "OFFLINE_FAILED"}
+_TERMINAL_FAIL = {"FAILED", "OFFLINE_FAILED", "TABLED_OFFLINE"}
 _IN_PROGRESS = {
     "PROVISIONING",
     "PROVISIONING_INITIAL_SNAPSHOT",
@@ -35,9 +50,156 @@ _IN_PROGRESS = {
     "ONLINE_TRIGGERED_UPDATE",
     "ONLINE_PIPELINE_FAILED",
     "ONLINE_UPDATING_PIPELINE_RESOURCES",
-    "ONLINE_NO_PENDING_UPDATE",
+    "ONLINE_CONTINUOUS_UPDATE",
     "OFFLINE",
 }
+
+# ---------------------------------------------------------------------------
+# SDK availability probe
+# ---------------------------------------------------------------------------
+
+try:
+    from databricks.sdk.service import database as _db_svc  # noqa: F401
+
+    _SDK_DATABASE_AVAILABLE = True
+except ImportError:
+    _db_svc = None  # type: ignore[assignment]
+    _SDK_DATABASE_AVAILABLE = False
+    logger.debug(
+        "databricks.sdk.service.database not available — "
+        "SyncedTableManager will use direct REST calls"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+class _DictNamespace:
+    """Recursively wrap a JSON dict so nested keys are accessible as attributes.
+
+    Used to normalise SDK-object vs. plain-dict responses so the same
+    ``getattr``-based helpers work regardless of which code path ran.
+    """
+
+    def __init__(self, data: Any) -> None:
+        self._data = data if isinstance(data, dict) else {}
+
+    def __getattr__(self, name: str) -> Any:
+        val = self._data.get(name)
+        if isinstance(val, dict):
+            return _DictNamespace(val)
+        if isinstance(val, list):
+            return [_DictNamespace(v) if isinstance(v, dict) else v for v in val]
+        return val
+
+    def __repr__(self) -> str:  # pragma: no cover
+        return f"_DictNamespace({self._data!r})"
+
+
+def _to_dict(obj: Any) -> dict:
+    """Convert an SDK dataclass *or* a plain dict to ``dict``."""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "as_dict"):
+        return obj.as_dict()
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# REST-only database API (no databricks.sdk.service.database required)
+# ---------------------------------------------------------------------------
+
+
+class _RestDatabaseAPI:
+    """Direct REST implementation of the three synced-table endpoints.
+
+    Uses the SDK ``WorkspaceClient.api_client.do()`` for auth so the same
+    credential flow works in local dev (PAT), Databricks Apps (OIDC M2M),
+    and CI (env-var token).  Falls back to a raw ``requests`` call with
+    ``DATABRICKS_TOKEN`` only when the SDK's ``api_client`` is unavailable.
+    """
+
+    def __init__(self, workspace_client: Any) -> None:
+        self._wc = workspace_client
+
+    def _do(self, method: str, path: str, **kwargs: Any) -> Any:
+        """Route through SDK's ApiClient when possible; raw requests otherwise."""
+        api = getattr(self._wc, "api_client", None)
+        if api is not None and hasattr(api, "do"):
+            # SDK ApiClient handles auth (PAT / OIDC / Apps credential injection).
+            return api.do(method, path, **kwargs)
+
+        # Last-resort fallback: raw requests with DATABRICKS_TOKEN.
+        import os
+
+        import requests
+
+        host = (os.environ.get("DATABRICKS_HOST") or "").strip().rstrip("/")
+        if host and not host.startswith(("http://", "https://")):
+            host = "https://" + host
+        token = os.environ.get("DATABRICKS_TOKEN") or ""
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        body = kwargs.get("body")
+        resp = requests.request(
+            method,
+            f"{host}{path}",
+            json=body,
+            params=kwargs.get("query"),
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 404:
+            raise ValueError(f"404 Not Found: {path}")
+        resp.raise_for_status()
+        return resp.json() if resp.content else {}
+
+    def get_synced_database_table(self, *, name: str) -> Any:
+        try:
+            data = self._do("GET", f"/api/2.0/database/synced_tables/{name}")
+        except Exception as exc:
+            if "404" in str(exc) or "not found" in str(exc).lower():
+                raise ValueError(f"Synced table {name!r} not found") from exc
+            raise
+        if _SDK_DATABASE_AVAILABLE and _db_svc is not None:
+            return _db_svc.SyncedDatabaseTable.from_dict(data)
+        return _DictNamespace(data)
+
+    def create_synced_database_table(self, *, synced_table: Any) -> Any:
+        body = _to_dict(synced_table)
+        data = self._do("POST", "/api/2.0/database/synced_tables", body=body)
+        if _SDK_DATABASE_AVAILABLE and _db_svc is not None:
+            return _db_svc.SyncedDatabaseTable.from_dict(data)
+        return _DictNamespace(data)
+
+    def delete_synced_database_table(self, *, name: str, purge_data: bool = True) -> None:
+        try:
+            self._do(
+                "DELETE",
+                f"/api/2.0/database/synced_tables/{name}",
+                query={"purge_data": "true" if purge_data else "false"},
+            )
+        except Exception as exc:
+            if "404" in str(exc) or "not found" in str(exc).lower():
+                return
+            raise
+
+
+class _CompatWorkspaceClient:
+    """Thin wrapper that injects a REST-based ``.database`` when the SDK lacks one."""
+
+    def __init__(self, workspace_client: Any) -> None:
+        self._wc = workspace_client
+        self.database = _RestDatabaseAPI(workspace_client)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._wc, name)
+
+
+# ---------------------------------------------------------------------------
+# SyncedTableManager
+# ---------------------------------------------------------------------------
 
 
 class SyncedTableManager:
@@ -68,7 +230,14 @@ class SyncedTableManager:
     def _default_factory() -> Any:
         from databricks.sdk import WorkspaceClient
 
-        return WorkspaceClient()
+        w = WorkspaceClient()
+        if hasattr(w, "database"):
+            return w
+        # SDK in this environment predates WorkspaceClient.database — use REST.
+        logger.debug(
+            "WorkspaceClient.database not available — using REST fallback for synced-table API"
+        )
+        return _CompatWorkspaceClient(w)
 
     def _w(self) -> Any:
         if self._client is None:
@@ -78,7 +247,7 @@ class SyncedTableManager:
     # -- CRUD -------------------------------------------------------------
 
     def get(self, name: str) -> Optional[Any]:
-        """Return the ``SyncedDatabaseTable`` or *None* if it does not exist."""
+        """Return the ``SyncedDatabaseTable`` (or dict-namespace) or *None*."""
         try:
             return self._w().database.get_synced_database_table(name=name)
         except Exception as exc:  # noqa: BLE001
@@ -104,13 +273,13 @@ class SyncedTableManager:
             logger.info("Synced table %s already exists — reusing", name)
             return existing
 
-        spec = self._build_spec(
+        synced = self._build_synced_table_payload(
+            name=name,
             source_table_full_name=source_table_full_name,
             primary_key_columns=primary_key_columns,
             sync_mode=sync_mode,
             create_database_objects_if_missing=create_database_objects_if_missing,
         )
-        synced = self._build_synced_table(name=name, spec=spec)
         try:
             created = self._w().database.create_synced_database_table(
                 synced_table=synced
@@ -151,8 +320,6 @@ class SyncedTableManager:
             )
             return getattr(update, "update_id", "") or ""
         except Exception as exc:  # noqa: BLE001
-            # Another snapshot/update may already be running (e.g. initial
-            # provisioning right after create_synced_database_table).
             if self._is_active_pipeline_update_conflict(exc):
                 logger.info(
                     "Skipping start_update for %s — pipeline %s already has an "
@@ -170,18 +337,7 @@ class SyncedTableManager:
         timeout_s: int = DEFAULT_TIMEOUT_S,
         pipeline_update_id: Optional[str] = None,
     ) -> str:
-        """Block until the sync reaches a terminal state; raise on failure / timeout.
-
-        When ``pipeline_update_id`` is set (returned from ``pipelines.start_update``),
-        we **first** poll ``pipelines.get_update`` until that update reaches a terminal
-        state. That ties the build to the **specific Lakeflow run** started by
-        ``trigger_refresh``. Without this, ``wait_get_pipeline_idle`` can return
-        immediately while the synced table is still ``ONLINE_*`` from the **previous**
-        snapshot — so no visible pipeline activity occurs for the new build.
-
-        Otherwise (e.g. ``start_update`` skipped due to an active update conflict),
-        we fall back to ``wait_get_pipeline_idle`` plus synced-table polling.
-        """
+        """Block until the sync reaches a terminal state; raise on failure / timeout."""
         deadline = time.time() + max(1, int(timeout_s))
         last_state = ""
         idle_pipeline_wait_done = False
@@ -260,19 +416,12 @@ class SyncedTableManager:
         timeout_s: int = DEFAULT_TIMEOUT_S,
         skip_initial_trigger: bool = False,
     ) -> str:
-        """Convenience: ``trigger_refresh`` then ``wait_for_completion``.
-
-        ``skip_initial_trigger`` is useful right after :meth:`ensure`, because
-        creation already kicks off the initial snapshot run.
-        """
+        """Convenience: ``trigger_refresh`` then ``wait_for_completion``."""
         update_id = ""
         if not skip_initial_trigger:
             try:
                 update_id = self.trigger_refresh(name)
             except (ValidationError, InfrastructureError) as exc:
-                # Just-created synced tables auto-fire their first sync; the
-                # pipeline_id may not be queryable yet. Fall through to the
-                # poll loop, which will see the in-progress state.
                 logger.debug(
                     "Could not trigger refresh on %s yet (will poll): %s", name, exc
                 )
@@ -336,22 +485,45 @@ class SyncedTableManager:
                 f"Failed to delete synced table {name}: {exc}"
             ) from exc
 
-    # -- SDK shape helpers ------------------------------------------------
+    # -- Payload builders -------------------------------------------------
 
-    def _build_spec(
+    def _build_synced_table_payload(
         self,
         *,
+        name: str,
         source_table_full_name: str,
         primary_key_columns: List[str],
         sync_mode: str,
         create_database_objects_if_missing: bool,
     ) -> Any:
-        from databricks.sdk.service import database as db_service
-
-        sync_mode_norm = (sync_mode or "snapshot").upper()
-        scheduling_policy_cls = getattr(
-            db_service, "SyncedTableSchedulingPolicy", None
+        """Return a synced-table payload — SDK object when available, dict otherwise."""
+        if _SDK_DATABASE_AVAILABLE and _db_svc is not None:
+            return self._build_synced_table_sdk(
+                name=name,
+                source_table_full_name=source_table_full_name,
+                primary_key_columns=primary_key_columns,
+                sync_mode=sync_mode,
+                create_database_objects_if_missing=create_database_objects_if_missing,
+            )
+        return self._build_synced_table_dict(
+            name=name,
+            source_table_full_name=source_table_full_name,
+            primary_key_columns=primary_key_columns,
+            sync_mode=sync_mode,
+            create_database_objects_if_missing=create_database_objects_if_missing,
         )
+
+    def _build_synced_table_sdk(
+        self,
+        *,
+        name: str,
+        source_table_full_name: str,
+        primary_key_columns: List[str],
+        sync_mode: str,
+        create_database_objects_if_missing: bool,
+    ) -> Any:
+        sync_mode_norm = (sync_mode or "snapshot").upper()
+        scheduling_policy_cls = getattr(_db_svc, "SyncedTableSchedulingPolicy", None)
         if scheduling_policy_cls is not None:
             policy = getattr(scheduling_policy_cls, sync_mode_norm, None) or getattr(
                 scheduling_policy_cls, "SNAPSHOT"
@@ -359,24 +531,41 @@ class SyncedTableManager:
         else:
             policy = sync_mode_norm
 
-        spec_cls = getattr(db_service, "SyncedTableSpec")
-        return spec_cls(
+        spec = _db_svc.SyncedTableSpec(  # type: ignore[union-attr]
             source_table_full_name=source_table_full_name,
             primary_key_columns=list(primary_key_columns),
             scheduling_policy=policy,
             create_database_objects_if_missing=create_database_objects_if_missing,
         )
-
-    def _build_synced_table(self, *, name: str, spec: Any) -> Any:
-        from databricks.sdk.service import database as db_service
-
-        synced_cls = getattr(db_service, "SyncedDatabaseTable")
-        return synced_cls(
+        return _db_svc.SyncedDatabaseTable(  # type: ignore[union-attr]
             name=name,
             database_instance_name=self._instance,
             logical_database_name=self._logical_db,
             spec=spec,
         )
+
+    def _build_synced_table_dict(
+        self,
+        *,
+        name: str,
+        source_table_full_name: str,
+        primary_key_columns: List[str],
+        sync_mode: str,
+        create_database_objects_if_missing: bool,
+    ) -> dict:
+        return {
+            "name": name,
+            "database_instance_name": self._instance,
+            "logical_database_name": self._logical_db,
+            "spec": {
+                "source_table_full_name": source_table_full_name,
+                "primary_key_columns": list(primary_key_columns),
+                "scheduling_policy": (sync_mode or "snapshot").upper(),
+                "create_database_objects_if_missing": create_database_objects_if_missing,
+            },
+        }
+
+    # -- SDK shape helpers ------------------------------------------------
 
     @staticmethod
     def _extract_pipeline_id(synced: Any) -> str:
@@ -395,9 +584,8 @@ class SyncedTableManager:
             or getattr(status, "state", None)
             or ""
         )
-        # Some SDK versions return enum values whose ``str(...)`` is
-        # ``"ClassName.MEMBER"``; ``.name`` gives the bare member name.
-        return str(getattr(state, "name", state)).upper()
+        raw = str(getattr(state, "name", state)).upper()
+        return raw.removeprefix("SYNCED_TABLE_")
 
     @staticmethod
     def _is_not_found(exc: Exception) -> bool:
@@ -415,7 +603,6 @@ class SyncedTableManager:
 
     @staticmethod
     def _is_active_pipeline_update_conflict(exc: BaseException) -> bool:
-        """True when Lakeflow rejects a second start_update while one is running."""
         msg = str(exc).lower()
         return (
             "active update" in msg

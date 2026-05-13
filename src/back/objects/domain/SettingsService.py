@@ -1795,8 +1795,8 @@ class SettingsService:
                     cur.execute(
                         """
                         SELECT EXISTS (
-                            SELECT 1 FROM information_schema.schemata
-                            WHERE schema_name = %s
+                            SELECT 1 FROM pg_catalog.pg_namespace
+                            WHERE nspname = %s
                         )
                         """,
                         (schema,),
@@ -1808,9 +1808,10 @@ class SettingsService:
                     if schema_exists:
                         cur.execute(
                             """
-                            SELECT COUNT(*)::bigint
-                            FROM information_schema.tables
-                            WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                            SELECT COUNT(*)
+                            FROM pg_catalog.pg_class c
+                            JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                            WHERE n.nspname = %s AND c.relkind = 'r'
                             """,
                             (schema,),
                         )
@@ -1872,6 +1873,198 @@ class SettingsService:
             return out
         except Exception as exc:  # noqa: BLE001
             logger.warning("graph_engine_uc_catalogs failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
+    def graph_engine_lakebase_projects_result(
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List all Lakebase Autoscaling projects visible in the workspace."""
+        out: Dict[str, Any] = {"success": False, "projects": [], "message": ""}
+        try:
+            from databricks.sdk import WorkspaceClient
+
+            w = WorkspaceClient()
+            api = getattr(w, "api_client", None)
+            if api is None or not hasattr(api, "do"):
+                out["message"] = "Databricks SDK api_client unavailable"
+                return out
+            raw = (api.do("GET", "/api/2.0/postgres/projects") or {}).get("projects") or []
+            projects = []
+            for p in raw:
+                name = p.get("name") or ""
+                if not name:
+                    continue
+                short = name.rsplit("/", 1)[-1]
+                status = p.get("status") or {}
+                projects.append({
+                    "name": name,
+                    "short_name": short,
+                    "state": status.get("state") or "",
+                })
+            out["success"] = True
+            out["projects"] = projects
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_projects failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
+    def graph_engine_lakebase_branches_result(
+        project_path: str,
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List branches for a Lakebase Autoscaling project."""
+        out: Dict[str, Any] = {"success": False, "branches": [], "message": ""}
+        if not project_path:
+            out["message"] = "project_path is required"
+            return out
+        try:
+            from databricks.sdk import WorkspaceClient
+
+            w = WorkspaceClient()
+            api = getattr(w, "api_client", None)
+            if api is None or not hasattr(api, "do"):
+                out["message"] = "Databricks SDK api_client unavailable"
+                return out
+            # Normalise: accept both short name and full resource path
+            if not project_path.startswith("projects/"):
+                project_path = f"projects/{project_path}"
+            raw = (
+                api.do("GET", f"/api/2.0/postgres/{project_path}/branches") or {}
+            ).get("branches") or []
+            branches = []
+            for b in raw:
+                name = b.get("name") or ""
+                if not name:
+                    continue
+                short = name.rsplit("/", 1)[-1]
+                status = b.get("status") or {}
+                branches.append({
+                    "name": name,
+                    "short_name": short,
+                    "state": status.get("state") or "",
+                })
+            out["success"] = True
+            out["branches"] = branches
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_branches failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
+    def graph_engine_lakebase_pg_databases_result(
+        branch_path: str,
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List Postgres databases on a Lakebase branch endpoint."""
+        out: Dict[str, Any] = {"success": False, "databases": [], "message": ""}
+        if not branch_path:
+            out["message"] = "branch_path is required"
+            return out
+        try:
+            from databricks.sdk import WorkspaceClient
+
+            w = WorkspaceClient()
+            api = getattr(w, "api_client", None)
+            if api is None or not hasattr(api, "do"):
+                out["message"] = "Databricks SDK api_client unavailable"
+                return out
+            raw = (
+                api.do("GET", f"/api/2.0/postgres/{branch_path}/databases") or {}
+            ).get("databases") or []
+            databases = []
+            for db in raw:
+                status = db.get("status") or {}
+                pg_name = status.get("postgres_database") or ""
+                if pg_name:
+                    databases.append(pg_name)
+            out["success"] = True
+            out["databases"] = sorted(databases)
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_pg_databases failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
+    def graph_engine_lakebase_pg_schemas_result(
+        database: str,
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List Postgres schemas in a Lakebase database (using the bound instance)."""
+        out: Dict[str, Any] = {"success": False, "schemas": [], "message": ""}
+        try:
+            from back.core.databricks import get_lakebase_auth
+            from back.core.graphdb.lakebase.pool import _require_psycopg
+
+            auth = get_lakebase_auth()
+            if not auth.is_available:
+                out["message"] = "Lakebase resource not bound (PGHOST/PGUSER missing)"
+                return out
+            psycopg, _ = _require_psycopg()
+            kwargs = auth.kwargs(application_name="ontobricks-schema-list")
+            if database:
+                kwargs["dbname"] = database
+            with psycopg.connect(**kwargs) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT nspname FROM pg_catalog.pg_namespace
+                        WHERE nspname NOT LIKE 'pg_%'
+                          AND nspname NOT IN ('information_schema')
+                        ORDER BY nspname
+                        """
+                    )
+                    schemas = [row[0] for row in cur.fetchall()]
+            out["success"] = True
+            out["schemas"] = schemas
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_pg_schemas failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
+    def graph_engine_uc_schemas_result(
+        catalog: str,
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List Unity Catalog schemas in a given catalog."""
+        out: Dict[str, Any] = {"success": False, "schemas": [], "message": ""}
+        if not catalog:
+            out["message"] = "catalog is required"
+            return out
+        try:
+            _, host, token, registry_cfg = SettingsService._resolve_context(
+                session_mgr, settings
+            )
+            global_config_service.load(host, token, registry_cfg, force=True)
+            warehouse_id = global_config_service.get_warehouse_id(
+                host, token, registry_cfg
+            )
+            if not warehouse_id:
+                out["message"] = "Configure a SQL warehouse under Settings → Databricks first."
+                return out
+            from back.core.databricks.DatabricksAuth import DatabricksAuth
+            from back.core.databricks.UnityCatalog import UnityCatalog
+
+            auth = DatabricksAuth(host=host, token=token, warehouse_id=warehouse_id)
+            uc = UnityCatalog(auth)
+            schemas = uc.get_schemas(catalog)
+            out["success"] = True
+            out["schemas"] = sorted(schemas) if schemas else []
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_uc_schemas failed: %s", exc)
             out["message"] = str(exc)
             return out
 

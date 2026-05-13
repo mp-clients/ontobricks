@@ -778,6 +778,55 @@ async def get_graph_engine_uc_catalogs(
     return config_service.graph_engine_uc_catalogs_result(session_mgr, settings)
 
 
+@router.get("/graph-engine/uc-schemas")
+async def get_graph_engine_uc_schemas(
+    catalog: str = "",
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """Unity Catalog schemas within a catalog for the managed-sync UC schema picker."""
+    return config_service.graph_engine_uc_schemas_result(catalog, session_mgr, settings)
+
+
+@router.get("/graph-engine/lakebase-projects")
+async def get_graph_engine_lakebase_projects(
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """List Lakebase Autoscaling projects visible in the workspace."""
+    return config_service.graph_engine_lakebase_projects_result(session_mgr, settings)
+
+
+@router.get("/graph-engine/lakebase-branches")
+async def get_graph_engine_lakebase_branches(
+    project: str = "",
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """List branches for a Lakebase Autoscaling project."""
+    return config_service.graph_engine_lakebase_branches_result(project, session_mgr, settings)
+
+
+@router.get("/graph-engine/lakebase-pg-databases")
+async def get_graph_engine_lakebase_pg_databases(
+    branch: str = "",
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """List Postgres databases on a Lakebase branch."""
+    return config_service.graph_engine_lakebase_pg_databases_result(branch, session_mgr, settings)
+
+
+@router.get("/graph-engine/lakebase-pg-schemas")
+async def get_graph_engine_lakebase_pg_schemas(
+    database: str = "",
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """List Postgres schemas in a Lakebase database."""
+    return config_service.graph_engine_lakebase_pg_schemas_result(database, session_mgr, settings)
+
+
 @router.post("/graph-engine-config")
 async def set_graph_engine_config(
     request: Request,

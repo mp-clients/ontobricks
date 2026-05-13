@@ -67,6 +67,7 @@ class LakebaseFlatStore(LakebaseBase):
         sync_table_mode: str = "snapshot",
         sync_timeout_s: int = _SYNC_DEFAULT_TIMEOUT_S,
         sync_uc_catalog: str = "",
+        sync_uc_schema: str = "",
         synced_manager: Optional[Any] = None,
     ) -> None:
         super().__init__(auth, schema, database_override)
@@ -76,6 +77,11 @@ class LakebaseFlatStore(LakebaseBase):
         self._sync_table_mode = sync_table_mode or "snapshot"
         self._sync_timeout_s = int(sync_timeout_s) if sync_timeout_s else _SYNC_DEFAULT_TIMEOUT_S
         self._sync_uc_catalog = sync_uc_catalog or ""
+        # UC schema segment for the synced-table FQN. Normally set to the
+        # registry Volume schema so the Lakeflow object lives in the same UC
+        # namespace as registry artefacts. Falls back to the Postgres graph
+        # schema when the registry is unreachable.
+        self._sync_uc_schema = sync_uc_schema or ""
         self._synced_manager = synced_manager
 
     # -- Mode introspection ------------------------------------------------
@@ -148,7 +154,8 @@ class LakebaseFlatStore(LakebaseBase):
                 "Cannot build synced UC name: no catalog configured "
                 "(set graph_engine_config.sync_uc_catalog or pass a Delta catalog)"
             )
-        return f"{catalog}.{self._schema}.{self.synced_phy(name)}"
+        uc_schema = (self._sync_uc_schema or self._schema).strip()
+        return f"{catalog}.{uc_schema}.{self.synced_phy(name)}"
 
     # -- Companion + union view DDL --------------------------------------
 
@@ -165,12 +172,26 @@ class LakebaseFlatStore(LakebaseBase):
             _companion_ddl.ensure_companion(cur, self._schema, companion)
 
     def ensure_synced_union_view(self, name: str) -> None:
-        """Create the union view once the ``_sync`` table exists (after Lakeflow snapshot)."""
+        """Create the union view once the ``_sync`` table exists (after Lakeflow snapshot).
+
+        The ``_sync`` table is placed by Lakebase in the Postgres schema that
+        corresponds to the UC schema segment of the synced-table FQN
+        (``_sync_uc_schema``). When that differs from the Postgres graph schema
+        (e.g. registry schema ``ontobricks`` vs graph schema ``ontobricks_graph``),
+        the ``_sync`` reference is schema-qualified so the DDL is independent of
+        the active ``search_path``.
+        """
         if not self.is_synced:
             return
         companion = self.companion_phy(name)
-        synced = self.synced_phy(name)
+        synced_bare = self.synced_phy(name)
         view = self._readable_table_id(name)
+        sync_pg_schema = (self._sync_uc_schema or self._schema).strip()
+        synced = (
+            f'"{sync_pg_schema}".{synced_bare}'
+            if sync_pg_schema != self._schema
+            else synced_bare
+        )
         with self._cursor() as cur:
             _companion_ddl.ensure_union_view(cur, view, synced, companion)
 
@@ -716,7 +737,13 @@ def resolve_lakebase_graph_schema(
         validate_graph_schema,
     )
 
-    raw = (config_schema or "").strip() or DEFAULT_GRAPH_SCHEMA
+    raw = (config_schema or "").strip()
+    if raw:
+        # Explicit schema configured in graph_engine_config — always honour it.
+        return validate_graph_schema(raw)
+
+    # No explicit schema: derive from the Registry Volume middle segment so
+    # managed-sync UC names stay aligned with the registry UC namespace.
     try:
         from back.objects.registry import RegistryCfg
 
@@ -728,16 +755,15 @@ def resolve_lakebase_graph_schema(
             except ValueError as exc:
                 logger.warning(
                     "Registry Volume schema %r is not a valid Lakebase identifier (%s) — "
-                    "falling back to graph_engine_config.schema",
+                    "falling back to default graph schema",
                     reg_schema,
                     exc,
                 )
             else:
                 logger.info(
                     "Lakebase graph schema=%s from Registry Volume triplet "
-                    "(overrides graph_engine_config.schema=%s)",
+                    "(graph_engine_config.schema was not set)",
                     validated,
-                    raw,
                 )
                 return validated
     except Exception as exc:  # noqa: BLE001
@@ -745,7 +771,7 @@ def resolve_lakebase_graph_schema(
             "resolve_lakebase_graph_schema: registry unavailable: %s",
             exc,
         )
-    return validate_graph_schema(raw)
+    return validate_graph_schema(DEFAULT_GRAPH_SCHEMA)
 
 
 def resolve_sync_uc_fallback_catalog(
@@ -789,3 +815,5 @@ def resolve_sync_uc_fallback_catalog(
         )
     dc = delta_cfg or {}
     return str(dc.get("catalog") or "").strip()
+
+

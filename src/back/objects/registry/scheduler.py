@@ -1013,7 +1013,7 @@ def _generate_sql_from_r2rml(domain, domain_name: str):
         f"PREFIX : <{base_uri}>\n"
         "PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\n"
         "PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\n\n"
-        "SELECT ?subject ?predicate ?object\n"
+        "SELECT DISTINCT ?subject ?predicate ?object\n"
         "WHERE {\n    ?subject ?predicate ?object .\n}"
     )
     res = sparql.translate_sparql_to_spark(sparql_q, ent, None, rels, dialect="spark")
@@ -1027,14 +1027,6 @@ def _stream_into_store(store, src, graph_name: str, select_sql: str, batch: int 
     if hasattr(store, "bulk_insert_iter"):
         return store.bulk_insert_iter(graph_name, rows, batch_size=batch)
     return store.insert_triples(graph_name, list(rows), batch_size=min(batch, 500))
-
-
-def _stream_out_of_store(store, src, graph_name: str, select_sql: str, batch: int = 5000) -> int:
-    """Stream warehouse rows into ``store.bulk_delete_iter`` (or list fallback)."""
-    rows = src.iter_rows(select_sql, batch_size=batch)
-    if hasattr(store, "bulk_delete_iter"):
-        return store.bulk_delete_iter(graph_name, rows, batch_size=batch)
-    return store.delete_triples(graph_name, list(rows), batch_size=min(batch, 500))
 
 
 def _is_managed_synced(store) -> bool:
@@ -1114,16 +1106,20 @@ def _apply_synced_pipeline(
             )
 
 
+def _count_view_triples(src, view_table: str) -> int:
+    """Return the server-side triple count for *view_table*."""
+    try:
+        rows = src.execute_query(f"SELECT COUNT(*) AS cnt FROM {view_table}")
+        return int(rows[0].get("cnt", 0)) if rows else 0
+    except Exception:
+        return 0
+
+
 def _write_graph_triples(
     store,
     src,
     graph_name: str,
     view_table: str,
-    snapshot_table: str,
-    actual_mode: str,
-    add_count: int,
-    rm_count: int,
-    incr_svc,
     domain_name: str,
     delta_cfg: Optional[Dict[str, Any]] = None,
     domain: Any = None,
@@ -1131,13 +1127,9 @@ def _write_graph_triples(
 ) -> int:
     """Write triples to the graph store. Returns the triple count.
 
-    Both row-by-row branches stream from the warehouse via ``iter_rows`` into
-    the graph store's bulk iterator, so the scheduler thread never holds the
-    full graph or the full diff in memory.
-
-    When the store is in Lakebase ``managed_synced`` mode, the entire branch
-    is replaced by a Lakeflow snapshot refresh -- triples never enter this
-    process at all.
+    When the store is in Lakebase ``managed_synced`` mode the entire branch is
+    replaced by a Lakeflow snapshot refresh — triples never enter this process.
+    Otherwise a full drop-and-rebuild is performed.
     """
     if _is_managed_synced(store):
         _apply_synced_pipeline(
@@ -1146,60 +1138,36 @@ def _write_graph_triples(
             delta_cfg or {},
             graph_name,
             view_table,
-            full=actual_mode == "full",
+            full=True,
             domain_name=domain_name,
             domain=domain,
             settings=settings,
         )
-        return incr_svc.count_view_triples(view_table)
+        return _count_view_triples(src, view_table)
 
-    if actual_mode == "full":
-        triple_count = incr_svc.count_view_triples(view_table)
+    triple_count = _count_view_triples(src, view_table)
+    logger.info(
+        "Scheduled build [%s]: %d triples reported by VIEW",
+        domain_name,
+        triple_count,
+    )
+
+    if triple_count > 0:
+        store.drop_table(graph_name)
+        store.create_table(graph_name)
+        _stream_into_store(
+            store,
+            src,
+            graph_name,
+            f"SELECT subject, predicate, object FROM {view_table}",
+        )
+        store.optimize_table(graph_name)
         logger.info(
-            "Scheduled build [%s]: %d triples reported by VIEW",
+            "Scheduled build [%s]: graph '%s' populated with %d triples",
             domain_name,
+            graph_name,
             triple_count,
         )
-
-        if triple_count > 0:
-            store.drop_table(graph_name)
-            store.create_table(graph_name)
-            _stream_into_store(
-                store,
-                src,
-                graph_name,
-                f"SELECT subject, predicate, object FROM {view_table}",
-            )
-            store.optimize_table(graph_name)
-            logger.info(
-                "Scheduled build [%s]: graph '%s' populated with %d triples",
-                domain_name,
-                graph_name,
-                triple_count,
-            )
-    else:
-        triple_count = incr_svc.count_view_triples(view_table)
-        if rm_count > 0:
-            removed_sql = (
-                f"SELECT subject, predicate, object FROM {snapshot_table} "
-                f"EXCEPT "
-                f"SELECT subject, predicate, object FROM {view_table}"
-            )
-            _stream_out_of_store(store, src, graph_name, removed_sql)
-            logger.info(
-                "Scheduled build [%s]: removed %d triples", domain_name, rm_count
-            )
-        if add_count > 0:
-            added_sql = (
-                f"SELECT subject, predicate, object FROM {view_table} "
-                f"EXCEPT "
-                f"SELECT subject, predicate, object FROM {snapshot_table}"
-            )
-            _stream_into_store(store, src, graph_name, added_sql)
-            logger.info(
-                "Scheduled build [%s]: added %d triples", domain_name, add_count
-            )
-        store.optimize_table(graph_name)
     return triple_count
 
 
@@ -1238,18 +1206,20 @@ def _persist_domain_metadata(
 
 def _run_scheduled_build(
     domain_name: str,
-    drop_existing: bool,
+    drop_existing: bool,  # kept for backward-compat with persisted schedule configs
     settings,
     registry_cfg: Optional[Dict[str, str]] = None,
     version: str = "latest",
 ) -> None:
     """Execute a Digital Twin build for *domain_name* without a user session.
 
-    Loads the domain from the registry, generates SQL from R2RML,
-    creates the VIEW, and populates LadybugDB.
+    Loads the domain from the registry, generates SQL from R2RML, creates
+    the VIEW, and populates the graph store (full rebuild every run).
 
     When *version* is ``"latest"`` (default) the newest version is loaded.
-    Otherwise the specific version string is used.
+    The ``drop_existing`` flag is accepted for backward compatibility with
+    persisted schedule configs but has no effect — all scheduled builds are
+    full rebuilds.
 
     The entire function is wrapped in a fail-safe try/except so that
     no exception can silently escape to APScheduler's executor.
@@ -1358,63 +1328,8 @@ def _run_scheduled_build(
             raise InfrastructureError(f"Failed to create VIEW: {detail}")
         tm.update_progress(task.id, 40, "VIEW created")
 
-        # --- Incremental logic ---
-        from back.core.triplestore import IncrementalBuildService
-
-        incr_svc = IncrementalBuildService(src)
-
-        snapshot_table = incr_svc.snapshot_table_name(
-            (domain.info or {}).get("name", DEFAULT_GRAPH_NAME),
-            getattr(domain, "delta", None) or {},
-            version=getattr(domain, "current_version", "1"),
-        )
-
-        actual_mode = "full" if drop_existing else "incremental"
-        add_count = 0
-        rm_count = 0
-
-        if actual_mode == "incremental" and incr_svc.snapshot_exists(snapshot_table):
-            logger.info("Scheduled build [%s]: computing incremental diff", domain_name)
-            try:
-                add_count, rm_count = incr_svc.count_diff(view_table, snapshot_table)
-                view_count = incr_svc.count_view_triples(view_table)
-                if incr_svc.should_fallback_to_full(
-                    add_count, rm_count, view_count
-                ):
-                    actual_mode = "full"
-                elif add_count == 0 and rm_count == 0:
-                    triple_count = view_count
-                    logger.info(
-                        "Scheduled build [%s]: no changes, skipping graph write",
-                        domain_name,
-                    )
-                    tm.update_progress(task.id, 90, "No changes detected")
-                    try:
-                        incr_svc.refresh_snapshot(view_table, snapshot_table)
-                    except Exception as snap_e:
-                        logger.warning(
-                            "Scheduled build [%s]: snapshot refresh failed: %s",
-                            domain_name,
-                            snap_e,
-                        )
-                    status = "success"
-                    message = f"No changes — {triple_count} triples unchanged"
-                    _persist_domain_metadata(
-                        svc, domain, version, build_ts, domain_name
-                    )
-                    return
-            except Exception as e:
-                logger.warning(
-                    "Scheduled build [%s]: incremental diff failed, falling back to full: %s",
-                    domain_name,
-                    e,
-                )
-                actual_mode = "full"
-        else:
-            actual_mode = "full"
-
         # --- Step 3: Populate graph ---
-        tm.advance_step(task.id, f"Applying changes to graph {graph_name}...")
+        tm.advance_step(task.id, f"Applying to graph {graph_name}...")
 
         from back.core.triplestore import get_triplestore
         from back.objects.digitaltwin.models import DomainSnapshot
@@ -1422,38 +1337,18 @@ def _run_scheduled_build(
         snap = DomainSnapshot(domain, host=host, token=token)
         store = get_triplestore(snap, settings, backend="graph")
         if not store:
-            raise InfrastructureError("Could not initialize LadybugDB backend")
+            raise InfrastructureError("Could not initialize graph backend")
 
         triple_count = _write_graph_triples(
             store,
             src,
             graph_name,
             view_table,
-            snapshot_table,
-            actual_mode,
-            add_count,
-            rm_count,
-            incr_svc,
             domain_name,
             delta_cfg=getattr(domain, "delta", None) or {},
             domain=domain,
             settings=settings,
         )
-
-        if _is_managed_synced(store):
-            logger.info(
-                "Scheduled build [%s]: skipping snapshot CTAS "
-                "(managed_synced — Lakeflow owns the truth)",
-                domain_name,
-            )
-        else:
-            try:
-                incr_svc.refresh_snapshot(view_table, snapshot_table)
-                logger.info("Scheduled build [%s]: snapshot refreshed", domain_name)
-            except Exception as snap_e:
-                logger.warning(
-                    "Scheduled build [%s]: snapshot refresh failed: %s", domain_name, snap_e
-                )
 
         tm.update_progress(task.id, 95, "Saving domain metadata...")
         _persist_domain_metadata(svc, domain, version, build_ts, domain_name)
