@@ -87,7 +87,7 @@ async def get_current_user(
     domain = get_domain(session_mgr)
     client = get_databricks_client(domain, settings)
     if not client:
-        return {"success": False, "email": ""}
+        return {"success": True, "email": ""}
     email = client.get_current_user_email()
     return {"success": True, "email": email}
 

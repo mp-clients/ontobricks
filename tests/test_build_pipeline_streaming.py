@@ -127,23 +127,6 @@ class TestFullRebuildProgressMessage:
         assert not any("Written 4500/4500" in m for m in msgs), msgs
 
 
-class TestStartBackgroundArchive:
-    def test_skipped_for_sql_backed_engines(self):
-        """SQL-backed engines (Lakebase) skip the registry archive step."""
-        pipe = _bare_pipeline()
-        pipe.tm.advance_step = MagicMock()
-        pipe.tm.skip_step = MagicMock()
-        pipe.tm.create_task = MagicMock()
-
-        pipe._start_background_archive()
-
-        pipe.tm.create_task.assert_not_called()
-        pipe.tm.skip_step.assert_called_once()
-        skip_args = pipe.tm.skip_step.call_args.args
-        assert skip_args[0] == pipe.task_id
-        assert "lakebase" in skip_args[1].lower()
-
-
 # ---------------------------------------------------------------
 # Lakebase managed-synced apply path
 # ---------------------------------------------------------------

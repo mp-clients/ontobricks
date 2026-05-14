@@ -1103,11 +1103,6 @@ class DomainSession:
         return self._data["settings"]
 
     @property
-    def preferences(self) -> Dict[str, Any]:
-        """Backward-compatible alias for settings."""
-        return self._data["settings"]
-
-    @property
     def generated(self) -> Dict[str, str]:
         """Get generated content (OWL, SQL, R2RML).
 

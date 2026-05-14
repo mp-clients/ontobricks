@@ -567,7 +567,7 @@ async def validate_swrl_rule(request: Request):
     data = await request.json()
     errors = Ontology.validate_swrl_rule(data.get("rule", {}))
     if errors:
-        return {"success": False, "valid": False, "errors": errors}
+        raise ValidationError("SWRL rule is invalid", detail="; ".join(str(e) for e in errors))
     return {"success": True, "valid": True, "message": "Rule syntax is valid"}
 
 
@@ -680,7 +680,10 @@ async def validate_rule(rule_type: str, request: Request):
             errors = AggregateRuleEngine.validate_rule(rule)
 
     if errors:
-        return {"success": False, "valid": False, "errors": errors}
+        raise ValidationError(
+            f"{rule_type.replace('_', ' ').title()} rule is invalid",
+            detail="; ".join(str(e) for e in errors),
+        )
     return {"success": True, "valid": True, "message": "Rule is valid"}
 
 

@@ -16,7 +16,7 @@ from back.objects.registry import ROLE_ADMIN, require
 
 from api.routers.internal._permissions import filter_visible_domains
 
-from back.objects.domain.SettingsService import SettingsService as config_service
+from back.objects.domain import SettingsService as config_service
 
 router = APIRouter(prefix="/settings", tags=["Settings"])
 

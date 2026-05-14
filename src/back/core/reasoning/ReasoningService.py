@@ -331,15 +331,20 @@ class ReasoningService:
     def run_constraint_checks(self) -> ReasoningResult:
         """Validate instance data against ontology constraints.
 
-        Legacy constraint checks (cardinality, functional, value, global
-        rules) were originally implemented against a Cypher-capable graph
-        backend.  No such engine is currently registered, so this phase
-        returns an explicit ``skipped`` result.  Equivalent checks now run
-        through the SHACL pipeline in the Data Quality runner.
+        .. note:: **Placeholder — always returns ``skipped``.**
 
-        A future Cypher / Gremlin backend can re-enable native constraint
-        execution by implementing the dispatch helpers and dropping the
-        ``skipped`` short-circuit below.
+            Legacy cardinality, functional, value, and global-rule checks were
+            designed for a Cypher-capable graph backend.  No such backend is
+            currently registered; equivalent checks run through the SHACL
+            pipeline in the Data Quality runner (``/dataquality/*``).
+
+            To re-enable native constraint execution: implement the dispatch
+            helpers for a Cypher/Gremlin backend and replace the ``skipped``
+            short-circuit below with real execution logic.
+
+        Returns:
+            A :class:`ReasoningResult` with ``stats["skipped"] = True`` and
+            a human-readable ``reason``.
         """
         ontology = self._get_ontology_dict()
         constraints = ontology.get("constraints", [])
@@ -366,7 +371,7 @@ class ReasoningService:
             stats={
                 "phase": "constraints",
                 "skipped": True,
-                "reason": "Constraint checks require a Cypher-capable graph backend",
+                "reason": "Constraint checks require a Cypher-capable graph backend (not yet registered)",
             }
         )
 
