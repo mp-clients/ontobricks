@@ -124,14 +124,14 @@ REGISTRY_VOLUME=OntoBricksRegistry
 # Lakebase (Required since v0.4.0 for the domain registry)
 # When deployed as a Databricks App with a `database` resource bound,
 # Databricks auto-injects PG* — leave these unset in that case.
-# For local dev, point them at your Lakebase Autoscaling endpoint:
-PGHOST=ep-<id>.database.<region>.cloud.databricks.com
-PGPORT=5432
-PGDATABASE=ontobricks_registry
-PGUSER=you@example.com
+# For local dev use the semantic coordinates below:
+LAKEBASE_PROJECT=ontobricks-app          # Autoscaling project name
+LAKEBASE_BRANCH=develop                  # Branch to connect to
+LAKEBASE_DATABASE=ontobricks_registry    # Postgres database (datname)
+LAKEBASE_SCHEMA=ontobricks_registry      # Postgres schema for the registry
+PGUSER=you@example.com                   # Your Databricks email (local dev)
 # Postgres password is minted at runtime via `LakebaseAuth.password()`,
 # do NOT set PGPASSWORD here.
-LAKEBASE_SCHEMA=ontobricks_registry
 
 # Optional Configuration
 SECRET_KEY=your-secret-key-here
@@ -140,10 +140,11 @@ DATABRICKS_APP_PORT=8000
 
 > **Lakebase auth in local dev.** The Postgres password is a short-lived
 > JWT minted by `LakebaseAuth` via `POST /api/2.0/postgres/credentials`
-> using your `DATABRICKS_TOKEN`. The helper auto-discovers the Lakebase
-> project / branch / endpoint from `PGHOST` — pin it explicitly with
-> `LAKEBASE_PROJECT=<project-id>` if you want to skip the
-> discovery round-trip.
+> using your `DATABRICKS_TOKEN`. Set `LAKEBASE_PROJECT` + `LAKEBASE_BRANCH`
+> (and optionally `LAKEBASE_DATABASE`) in `.env` — `LakebaseAuth` resolves
+> the endpoint hostname automatically via the Postgres API.
+> In a deployed App, `PGHOST` / `PGDATABASE` / `PGUSER` are auto-injected
+> by the platform; `LAKEBASE_*` vars then serve as informational labels only.
 
 ## Running the Application
 
@@ -479,11 +480,13 @@ OntoBricks uses environment variables for configuration, making it easy to deplo
 | Variable | Description | Default / Source |
 |----------|-------------|------------------|
 | `LAKEBASE_SCHEMA` | Postgres schema used by the registry inside `PGDATABASE`. Mirror the bundle's `lakebase_registry_schema`. | `ontobricks_registry` |
-| `PGHOST` | Lakebase Autoscaling endpoint (`ep-<id>.database.<region>.cloud.databricks.com`). | *(auto-injected by the `database` Apps resource binding)* |
+| `LAKEBASE_PROJECT` | Lakebase Autoscaling **project id** (`projects/<this>/...`). Used by `LakebaseAuth` for local dev host resolution. In deployed Apps, informational only (injected via `app.yaml`). | *(set in `.env` for local dev)* |
+| `LAKEBASE_BRANCH` | Branch to connect to (e.g. `develop`, `production`). Used together with `LAKEBASE_PROJECT` to resolve the endpoint hostname locally. | *(set in `.env` for local dev)* |
+| `LAKEBASE_DATABASE` | Postgres database name (`datname`). Resolved from the branch when unset. | *(set in `.env` for local dev)* |
+| `PGHOST` | Lakebase Autoscaling endpoint (`ep-<id>.database.<region>.cloud.databricks.com`). **Auto-injected** by the `database` Apps resource binding — do not set in `.env`. | *(auto-injected by the Apps platform)* |
 | `PGPORT` | Postgres port. | `5432` |
-| `PGDATABASE` | Postgres database name (the `datname`, e.g. `ontobricks_registry` or `databricks_postgres`). | *(auto-injected)* |
-| `PGUSER` | Postgres role — for local dev, your Databricks email; in Apps, the SP client id. | *(auto-injected)* |
-| `LAKEBASE_PROJECT` | Optional override that pins the Lakebase **project id** (`projects/<this>/...`) so `LakebaseAuth` skips the endpoint walk. | *(auto-discovered from `PGHOST`)* |
+| `PGDATABASE` | Postgres database name. **Auto-injected** by the Apps platform. | *(auto-injected)* |
+| `PGUSER` | Postgres role — for local dev, your Databricks email; in Apps, the SP client id. | *(auto-injected in Apps; set in `.env` locally)* |
 
 The Postgres password is **never** set via env var — `LakebaseAuth`
 mints a short-lived JWT via `POST /api/2.0/postgres/credentials` using

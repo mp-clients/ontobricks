@@ -98,14 +98,13 @@ REGISTRY_CATALOG=<your-catalog>
 REGISTRY_SCHEMA=<your-schema>
 REGISTRY_VOLUME=OntoBricksRegistry
 
-# Lakebase (required since v0.4.0 — points at your Autoscaling endpoint)
-PGHOST=ep-<id>.database.<region>.cloud.databricks.com
-PGPORT=5432
-PGDATABASE=ontobricks_registry
-PGUSER=you@example.com   # your Databricks email locally; SP id in Apps
-LAKEBASE_SCHEMA=ontobricks_registry
-# Optional — pin the Lakebase project id to skip the endpoint walk
-# LAKEBASE_PROJECT=ontobricks-app
+# Lakebase (required since v0.4.0 — semantic local-dev coordinates)
+LAKEBASE_PROJECT=ontobricks-app          # Autoscaling project name
+LAKEBASE_BRANCH=develop                  # Branch to connect to
+LAKEBASE_DATABASE=ontobricks_registry    # Postgres database (datname)
+LAKEBASE_SCHEMA=ontobricks_registry      # Postgres schema for the registry
+PGUSER=you@example.com                   # Your Databricks email locally; SP id in Apps
+# PGHOST / PGPORT / PGDATABASE are auto-injected by the Apps platform — do not set here
 
 # Optional
 DATABRICKS_CATALOG=main
@@ -469,8 +468,17 @@ env:
   # PGAPPNAME / PGSSLMODE — no explicit valueFrom mapping needed.
   # The Postgres password is minted at runtime by LakebaseAuth via
   # POST /api/2.0/postgres/credentials.
+  # LAKEBASE_* vars are informational in the deployed app (used to
+  # display connection details in Settings → Registry) and as fallback
+  # when PGHOST is absent (local dev without a bound database resource).
   - name: LAKEBASE_SCHEMA
     value: "${APP_LAKEBASE_SCHEMA}"
+  - name: LAKEBASE_PROJECT
+    value: "${APP_LAKEBASE_PROJECT}"
+  - name: LAKEBASE_DATABASE
+    value: "${APP_LAKEBASE_DATABASE}"
+  - name: LAKEBASE_BRANCH
+    value: "${APP_LAKEBASE_BRANCH}"
 
   # ── MLflow ─────────────────────────────────────────────────────
   - name: MLFLOW_TRACKING_URI
