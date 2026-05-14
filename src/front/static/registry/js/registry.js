@@ -133,84 +133,12 @@ document.addEventListener('DOMContentLoaded', function () {
             }
         }
 
-        updateLakebaseInstanceBlock(lb.instance);
         // Auto-load row counts the first time the panel is displayed,
         // then keep them around — admins can re-fetch via the Refresh
         // button. Skipped when not bound (no point hammering the API).
         if (lb.bound && !panel.dataset.statsLoaded) {
             panel.dataset.statsLoaded = '1';
             loadLakebaseStats();
-        }
-    }
-
-    function updateLakebaseInstanceBlock(instance) {
-        const block = document.getElementById('lakebaseInstanceBlock');
-        if (!block) return;
-        if (!instance) {
-            block.style.display = 'none';
-            return;
-        }
-        block.style.display = '';
-
-        const set = (id, val) => {
-            const el = document.getElementById(id);
-            if (el) el.textContent = val || '—';
-        };
-        set('lakebaseInstanceName', instance.name);
-        set('lakebaseInstanceCapacity', instance.capacity);
-        set('lakebaseInstancePgVersion', instance.pg_version);
-        const nodes = instance.node_count;
-        set('lakebaseInstanceNodes', (nodes !== null && nodes !== undefined) ? String(nodes) : '');
-        const uidEl = document.getElementById('lakebaseInstanceUid');
-        if (uidEl) {
-            uidEl.textContent = instance.uid || '—';
-            if (instance.uid) uidEl.title = instance.uid;
-        }
-        const stateEl = document.getElementById('lakebaseInstanceState');
-        if (stateEl) {
-            const state = (instance.state || '').toUpperCase();
-            const stopped = !!instance.stopped;
-            let cls = 'badge bg-secondary';
-            let label = state || (stopped ? 'STOPPED' : 'unknown');
-            if (stopped) {
-                cls = 'badge bg-warning text-dark';
-                label = 'STOPPED';
-            } else if (state === 'AVAILABLE' || state === 'RUNNING' || state === 'READY') {
-                cls = 'badge bg-success';
-            } else if (state === 'STARTING' || state === 'PROVISIONING' || state === 'UPDATING') {
-                cls = 'badge bg-info text-dark';
-            } else if (state === 'FAILED' || state === 'ERROR') {
-                cls = 'badge bg-danger';
-            }
-            stateEl.innerHTML = '<span class="' + cls + '">' + escapeHtml(label) + '</span>';
-        }
-
-        // Lakebase Autoscaling-only: surface the active branch
-        // (the one hosting the bound PGDATABASE) plus the project's
-        // autoscaling CU min/max. Hide each block when the field
-        // is missing — the runtime payload omits them whenever the
-        // /api/2.0/postgres/projects/<name> lookup is unavailable.
-        const branchCol = document.getElementById('lakebaseInstanceBranchCol');
-        const branchEl = document.getElementById('lakebaseInstanceBranch');
-        const autoCol = document.getElementById('lakebaseInstanceAutoscaleCol');
-        const autoEl = document.getElementById('lakebaseInstanceAutoscale');
-        const branch = instance.branch || '';
-        const resource = instance.branch_resource || '';
-        if (branchCol) branchCol.style.display = branch ? '' : 'none';
-        if (branchEl && branch) {
-            branchEl.textContent = branch;
-            branchEl.title = resource || branch;
-        }
-        const min = instance.autoscaling_min_cu;
-        const max = instance.autoscaling_max_cu;
-        const hasRange = (min !== null && min !== undefined) || (max !== null && max !== undefined);
-        if (autoCol) autoCol.style.display = hasRange ? '' : 'none';
-        if (autoEl && hasRange) {
-            if (min !== null && min !== undefined && max !== null && max !== undefined && min !== max) {
-                autoEl.textContent = min + ' – ' + max;
-            } else {
-                autoEl.textContent = String(max ?? min);
-            }
         }
     }
 
