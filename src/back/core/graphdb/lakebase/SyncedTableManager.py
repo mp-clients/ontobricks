@@ -26,6 +26,7 @@ the module is missing the manager falls back to:
 
 from __future__ import annotations
 
+import concurrent.futures
 import time
 from datetime import timedelta
 from typing import Any, Callable, List, Optional
@@ -62,6 +63,36 @@ logger = get_logger(__name__)
 
 DEFAULT_TIMEOUT_S = 600
 _POLL_INTERVAL_S = 5
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive int env var with a fallback default.
+
+    Used so deployments can override post-create / missing-bail timeouts
+    without a code change when UC propagation is unusually slow.
+    """
+    import os
+
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(raw)
+        return v if v > 0 else default
+    except ValueError:
+        return default
+
+
+# How long to wait for a just-created synced table to become visible via GET
+# before considering registration a failure (UC propagation lag).
+# UC metastore propagation can take 2-3 minutes on first creation when the
+# schema is also being created on demand; default to 240s and allow override
+# via ONTOBRICKS_SYNC_POST_CREATE_S.
+_POST_CREATE_VISIBILITY_S = _env_int("ONTOBRICKS_SYNC_POST_CREATE_S", 240)
+# How long MISSING state is tolerated in wait_for_completion before we give up
+# with a clear error rather than looping until the global timeout.
+# Allow override via ONTOBRICKS_SYNC_MISSING_BAIL_S.
+_MISSING_BAIL_S = _env_int("ONTOBRICKS_SYNC_MISSING_BAIL_S", 240)
 
 # State names are normalised by ``_extract_state`` — the ``SYNCED_TABLE_``
 # SDK prefix is stripped, and the SDK typo ``SYNCED_TABLED_OFFLINE`` becomes
@@ -137,6 +168,38 @@ def _to_dict(obj: Any) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Timeout (seconds) for a single synced-table API call (GET or POST).
+# The SDK's http client has no built-in call-level timeout; we enforce one
+# by running each call in a thread and waiting with a deadline.
+# Override via ONTOBRICKS_SYNC_API_TIMEOUT_S (default 90s).
+_API_CALL_TIMEOUT_S = _env_int("ONTOBRICKS_SYNC_API_TIMEOUT_S", 90)
+
+
+def _call_with_timeout(fn: Callable, timeout_s: int, label: str) -> Any:
+    """Run *fn()* in a thread; raise InfrastructureError on timeout.
+
+    IMPORTANT: Uses ``shutdown(wait=False)`` so a hung API call does not
+    block the caller indefinitely after the timeout fires.  The background
+    thread is left to finish on its own (or be reaped when the process
+    exits) — acceptable for idempotent REST calls.
+    """
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = ex.submit(fn)
+    try:
+        return future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        raise InfrastructureError(
+            f"Synced-table API call timed out after {timeout_s}s ({label}). "
+            f"The Lakebase synced-table API may be unavailable or rate-limited "
+            f"in this workspace. Override timeout with "
+            f"ONTOBRICKS_SYNC_API_TIMEOUT_S env var."
+        )
+    finally:
+        # shutdown(wait=False): don't block waiting for the background thread.
+        # If the API call is hung, we propagate the error immediately.
+        ex.shutdown(wait=False)
+
+
 class _RestDatabaseAPI:
     """Direct REST implementation of the three synced-table endpoints.
 
@@ -144,6 +207,9 @@ class _RestDatabaseAPI:
     credential flow works in local dev (PAT), Databricks Apps (OIDC M2M),
     and CI (env-var token).  Falls back to a raw ``requests`` call with
     ``DATABRICKS_TOKEN`` only when the SDK's ``api_client`` is unavailable.
+
+    Every outbound call is wrapped in ``_call_with_timeout`` so a hung API
+    connection fails fast rather than blocking the build thread indefinitely.
     """
 
     def __init__(self, workspace_client: Any) -> None:
@@ -173,7 +239,7 @@ class _RestDatabaseAPI:
             json=body,
             params=kwargs.get("query"),
             headers=headers,
-            timeout=30,
+            timeout=_API_CALL_TIMEOUT_S,
         )
         if resp.status_code == 404:
             raise ValueError(f"404 Not Found: {path}")
@@ -181,8 +247,13 @@ class _RestDatabaseAPI:
         return resp.json() if resp.content else {}
 
     def get_synced_database_table(self, *, name: str) -> Any:
+        def _call():
+            return self._do("GET", f"/api/2.0/database/synced_tables/{name}")
+
         try:
-            data = self._do("GET", f"/api/2.0/database/synced_tables/{name}")
+            data = _call_with_timeout(_call, _API_CALL_TIMEOUT_S, f"GET synced_tables/{name}")
+        except InfrastructureError:
+            raise
         except Exception as exc:
             if "404" in str(exc) or "not found" in str(exc).lower():
                 raise ValueError(f"Synced table {name!r} not found") from exc
@@ -193,18 +264,33 @@ class _RestDatabaseAPI:
 
     def create_synced_database_table(self, *, synced_table: Any) -> Any:
         body = _to_dict(synced_table)
-        data = self._do("POST", "/api/2.0/database/synced_tables", body=body)
+        logger.info(
+            "Creating synced table via API (timeout=%ss): %s",
+            _API_CALL_TIMEOUT_S,
+            body.get("name", "?"),
+        )
+        data = _call_with_timeout(
+            lambda: self._do("POST", "/api/2.0/database/synced_tables", body=body),
+            _API_CALL_TIMEOUT_S,
+            f"POST synced_tables/{body.get('name', '?')}",
+        )
         if _SDK_DATABASE_AVAILABLE and _db_svc is not None:
             return _db_svc.SyncedDatabaseTable.from_dict(data)
         return _DictNamespace(data)
 
     def delete_synced_database_table(self, *, name: str, purge_data: bool = True) -> None:
         try:
-            self._do(
-                "DELETE",
-                f"/api/2.0/database/synced_tables/{name}",
-                query={"purge_data": "true" if purge_data else "false"},
+            _call_with_timeout(
+                lambda: self._do(
+                    "DELETE",
+                    f"/api/2.0/database/synced_tables/{name}",
+                    query={"purge_data": "true" if purge_data else "false"},
+                ),
+                _API_CALL_TIMEOUT_S,
+                f"DELETE synced_tables/{name}",
             )
+        except InfrastructureError:
+            raise
         except Exception as exc:
             if "404" in str(exc) or "not found" in str(exc).lower():
                 return
@@ -239,14 +325,16 @@ class SyncedTableManager:
 
     def __init__(
         self,
-        database_instance_name: str,
-        logical_database_name: str,
         *,
+        project_name: str = "",
+        branch_name: str = "",
+        logical_db: str = "",
         client_factory: Optional[Any] = None,
         sleep: Optional[Any] = None,
     ) -> None:
-        self._instance = database_instance_name
-        self._logical_db = logical_database_name
+        self._project = project_name
+        self._branch = branch_name
+        self._logical_db = logical_db
         self._client_factory = client_factory or self._default_factory
         self._client: Optional[Any] = None
         self._sleep = sleep or time.sleep
@@ -256,12 +344,23 @@ class SyncedTableManager:
         from databricks.sdk import WorkspaceClient
 
         w = WorkspaceClient()
+        # Always wrap in _CompatWorkspaceClient so that every call to
+        # .database goes through _RestDatabaseAPI → _call_with_timeout.
+        # The SDK's native WorkspaceClient.database (when present) has no
+        # per-call timeout and hangs indefinitely on slow/unavailable APIs.
         if hasattr(w, "database"):
-            return w
-        # SDK in this environment predates WorkspaceClient.database — use REST.
-        logger.debug(
-            "WorkspaceClient.database not available — using REST fallback for synced-table API"
-        )
+            logger.debug(
+                "WorkspaceClient.database available — wrapping with "
+                "_CompatWorkspaceClient for per-call timeout enforcement "
+                "(timeout=%ss, override via ONTOBRICKS_SYNC_API_TIMEOUT_S)",
+                _API_CALL_TIMEOUT_S,
+            )
+        else:
+            logger.debug(
+                "WorkspaceClient.database not available — using REST fallback "
+                "for synced-table API (timeout=%ss)",
+                _API_CALL_TIMEOUT_S,
+            )
         return _CompatWorkspaceClient(w)
 
     def _w(self) -> Any:
@@ -283,6 +382,22 @@ class SyncedTableManager:
     def exists(self, name: str) -> bool:
         return self.get(name) is not None
 
+    # How long to wait for first visibility before attempting a delete+recreate when
+    # the table was reported "already exists" but GET returns None.  This handles the
+    # common case where the table was created by a *different* principal (e.g. the
+    # developer running the app locally) and the app service principal lacks SELECT on it.
+    _STALE_OWNERSHIP_PROBE_S: int = 30
+
+    # Fallback UC-name suffixes tried when the Lakebase control-plane has a ghost
+    # reservation for the primary name (POST → "Destination table already exists in
+    # schema X" but GET → 404).  The control plane tracks reservations internally and
+    # they can outlive the UC registration when the latter is deleted without going
+    # through the synced-tables DELETE API (e.g. DROP TABLE in UC or domain reset).
+    # Suffixes are appended to the last component of the UC FQN:
+    #   primary:  catalog.schema.table_sync
+    #   fallback: catalog.schema.table_sync_b, ..._c, ..._d
+    _GHOST_FALLBACK_SUFFIXES: tuple = ("_b", "_c", "_d")
+
     def ensure(
         self,
         name: str,
@@ -292,37 +407,256 @@ class SyncedTableManager:
         sync_mode: str = "snapshot",
         create_database_objects_if_missing: bool = True,
     ) -> Any:
-        """Create the synced table if missing; otherwise return the existing one."""
+        """Create the synced table if missing; otherwise return the existing one.
+
+        Returns the synced-table object.  When the primary name has a ghost
+        control-plane reservation (see ``_GHOST_FALLBACK_SUFFIXES``), the
+        returned object's ``.name`` attribute may differ from *name* — callers
+        must use it downstream (union-view DDL, trigger, wait).
+
+        After a successful CREATE, polls until the table is visible via GET to
+        handle the UC registration propagation delay (~seconds).  Raises
+        ``InfrastructureError`` if visibility is not confirmed within
+        ``_POST_CREATE_VISIBILITY_S`` seconds.
+
+        **Stale-ownership recovery**: when POST returns 409 "already exists"
+        but GET keeps returning 404 for ``_STALE_OWNERSHIP_PROBE_S`` seconds,
+        the table was almost certainly created by a different principal (the
+        deploying user running the app locally).  In that case we delete the
+        stale table and re-create it so the app service principal becomes the
+        owner and the subsequent GET succeeds.
+
+        **Ghost control-plane recovery**: when POST returns the Lakebase
+        "Destination table already exists in schema" error but GET returns 404,
+        the Lakebase control-plane has a stale reservation from a previous build
+        that was cleaned up at the UC level without going through the
+        synced-tables DELETE API.  The reservation cannot be cleared externally;
+        instead, ``ensure`` retries with ``_b``, ``_c``, ``_d`` name suffixes.
+        """
         existing = self.get(name)
         if existing is not None:
             logger.info("Synced table %s already exists — reusing", name)
             return existing
 
-        synced = self._build_synced_table_payload(
-            name=name,
-            source_table_full_name=source_table_full_name,
-            primary_key_columns=primary_key_columns,
-            sync_mode=sync_mode,
-            create_database_objects_if_missing=create_database_objects_if_missing,
-        )
-        try:
-            created = self._w().database.create_synced_database_table(
-                synced_table=synced
+        # ── Candidate names: primary first, then ghost-state fallbacks ────────
+        candidates = [name] + [
+            f"{name}{sfx}" for sfx in self._GHOST_FALLBACK_SUFFIXES
+        ]
+        actual_name = name  # updated when a fallback is used
+
+        for candidate in candidates:
+            synced = self._build_synced_table_payload(
+                name=candidate,
+                source_table_full_name=source_table_full_name,
+                primary_key_columns=primary_key_columns,
+                sync_mode=sync_mode,
+                create_database_objects_if_missing=create_database_objects_if_missing,
             )
+            already_existed = False
+
+            # Check if this fallback candidate already exists.
+            if candidate != name:
+                existing_fallback = self.get(candidate)
+                if existing_fallback is not None:
+                    logger.info(
+                        "Synced table fallback %s already exists — reusing "
+                        "(primary %s has a ghost control-plane reservation).",
+                        candidate,
+                        name,
+                    )
+                    return existing_fallback
+
+            try:
+                self._w().database.create_synced_database_table(  # noqa: F841
+                    synced_table=synced
+                )
+                actual_name = candidate
+                if candidate != name:
+                    logger.warning(
+                        "Ghost control-plane reservation detected for %s — "
+                        "registered synced table under fallback name %s.  "
+                        "The primary name is permanently blocked until the "
+                        "Lakebase control-plane reservation is cleared.  "
+                        "To unblock: contact Databricks support or delete and "
+                        "recreate the Lakebase branch.",
+                        name,
+                        candidate,
+                    )
+                else:
+                    logger.info(
+                        "Created synced table %s (source=%s, mode=%s)",
+                        candidate,
+                        source_table_full_name,
+                        sync_mode,
+                    )
+                break  # success — exit candidate loop
+
+            except Exception as exc:  # noqa: BLE001
+                if self._is_ghost_control_plane_state(exc):
+                    # Try to release the reservation via DELETE — succeeds when
+                    # this principal owns it; silently ignored otherwise.
+                    try:
+                        self._w().database.delete_synced_database_table(
+                            name=candidate, purge_data=True
+                        )
+                        logger.info(
+                            "Ghost-state DELETE for %s succeeded — retrying CREATE",
+                            candidate,
+                        )
+                        try:
+                            self._w().database.create_synced_database_table(
+                                synced_table=synced
+                            )
+                            actual_name = candidate
+                            logger.info(
+                                "Re-created %s after ghost-state DELETE", candidate
+                            )
+                            break  # success after delete+recreate
+                        except Exception:  # noqa: BLE001
+                            pass  # still blocked — fall through to next candidate
+                    except Exception:  # noqa: BLE001
+                        pass  # DELETE also failed — fall through to next candidate
+
+                    if candidate == candidates[-1]:
+                        tried = ", ".join(candidates)
+                        raise InfrastructureError(
+                            f"Lakebase control-plane ghost reservation blocks synced "
+                            f"table creation.  Tried all candidates: {tried}.  "
+                            f"Root cause: a previous build registered the Postgres "
+                            f"destination (schema + table) at the control-plane level "
+                            f"but the UC registration was later deleted without going "
+                            f"through the synced-tables DELETE API (e.g. via UC DROP "
+                            f"TABLE or domain reset).  The reservation persists "
+                            f"independently of UC and Postgres state.\n"
+                            f"  Fix option 1 — Databricks support: ask them to clear "
+                            f"the control-plane reservation for {name!r}.\n"
+                            f"  Fix option 2 — recreate branch: delete and recreate "
+                            f"the Lakebase branch (all synced tables will need rebuild)."
+                        )
+                    logger.warning(
+                        "Ghost control-plane reservation for %s — trying next "
+                        "candidate (exc: %s)",
+                        candidate,
+                        exc,
+                    )
+                    continue  # next candidate
+
+                elif self._is_already_exists(exc):
+                    logger.warning(
+                        "Synced table %s: POST returned 409 'already exists' but "
+                        "the initial GET returned None — the table exists but this "
+                        "service principal cannot read it.  Will wait %ss; if still "
+                        "invisible, will attempt delete + re-create to take ownership.",
+                        candidate,
+                        self._STALE_OWNERSHIP_PROBE_S,
+                    )
+                    actual_name = candidate
+                    already_existed = True
+                    break  # exit candidate loop — use stale-ownership recovery below
+
+                else:
+                    raise InfrastructureError(
+                        f"Failed to create synced table {candidate}: {exc}"
+                    ) from exc
+
+        # ── Early probe when table "already existed" but is not readable ──────
+        # Quick poll for _STALE_OWNERSHIP_PROBE_S seconds.  If still invisible,
+        # the table is owned by another principal → delete and recreate.
+        if already_existed:
+            probe_deadline = time.time() + self._STALE_OWNERSHIP_PROBE_S
+            probe_visible: Optional[Any] = None
+            while time.time() < probe_deadline:
+                probe_visible = self.get(actual_name)
+                if probe_visible is not None:
+                    break
+                self._sleep(min(_POLL_INTERVAL_S, probe_deadline - time.time()))
+
+            if probe_visible is not None:
+                logger.info(
+                    "Synced table %s became visible during ownership probe",
+                    actual_name,
+                )
+                return probe_visible
+
+            # Still invisible → ownership conflict → attempt delete + recreate.
+            logger.warning(
+                "Synced table %s still invisible after %ss probe — "
+                "deleting stale table and re-creating under SP ownership.",
+                actual_name,
+                self._STALE_OWNERSHIP_PROBE_S,
+            )
+            synced_for_recreate = self._build_synced_table_payload(
+                name=actual_name,
+                source_table_full_name=source_table_full_name,
+                primary_key_columns=primary_key_columns,
+                sync_mode=sync_mode,
+                create_database_objects_if_missing=create_database_objects_if_missing,
+            )
+            try:
+                self._w().database.delete_synced_database_table(name=actual_name)
+                logger.info("Deleted stale synced table %s", actual_name)
+            except Exception as del_exc:  # noqa: BLE001
+                logger.warning(
+                    "Could not delete stale synced table %s: %s — "
+                    "proceeding to visibility poll anyway (delete may require "
+                    "CAN_MANAGE on the Lakebase project; see docs).",
+                    actual_name,
+                    del_exc,
+                )
+            else:
+                try:
+                    self._w().database.create_synced_database_table(
+                        synced_table=synced_for_recreate
+                    )
+                    logger.info(
+                        "Re-created synced table %s under SP ownership", actual_name
+                    )
+                except Exception as rc_exc:  # noqa: BLE001
+                    if not self._is_already_exists(rc_exc):
+                        raise InfrastructureError(
+                            f"Failed to re-create synced table {actual_name} after "
+                            f"deleting stale copy: {rc_exc}"
+                        ) from rc_exc
+
+        # ── Visibility poll (UC propagation delay after CREATE) ───────────────
+        deadline = time.time() + _POST_CREATE_VISIBILITY_S
+        attempt = 0
+        while True:
+            attempt += 1
+            visible = self.get(actual_name)
+            if visible is not None:
+                logger.info(
+                    "Synced table %s confirmed visible after %d GET attempt(s)",
+                    actual_name,
+                    attempt,
+                )
+                return visible
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise InfrastructureError(
+                    f"Synced table {actual_name!r} was created (or already existed) "
+                    f"but is not visible via GET after {_POST_CREATE_VISIBILITY_S}s. "
+                    f"Root causes in order of likelihood:\n"
+                    f"  1. The app SP lacks CAN_USE on the Lakebase Autoscaling "
+                    f"project — the /api/2.0/permissions/database-instances grant "
+                    f"used by bootstrap-lakebase-perms.sh may not apply to "
+                    f"Autoscaling projects.  Re-run the bootstrap script and verify "
+                    f"the grant appears in the project's ACL.\n"
+                    f"  2. The SP lacks SELECT on the Unity Catalog table — run: "
+                    f"  databricks grants update TABLE {actual_name} --json "
+                    f"'{{\"changes\":[{{\"principal\":\"<sp-client-id>\","
+                    f"\"add\":[\"SELECT\"]}}]}}'\n"
+                    f"  3. The Lakebase synced-table API is temporarily unavailable."
+                )
             logger.info(
-                "Created synced table %s (source=%s, mode=%s)",
-                name,
-                source_table_full_name,
-                sync_mode,
+                "Synced table %s not yet visible (attempt %d) — "
+                "retrying in %.1fs (%.0fs remaining)",
+                actual_name,
+                attempt,
+                min(_POLL_INTERVAL_S, remaining),
+                remaining,
             )
-            return created
-        except Exception as exc:  # noqa: BLE001
-            if self._is_already_exists(exc):
-                logger.info("Synced table %s already exists (race)", name)
-                return self.get(name)
-            raise InfrastructureError(
-                f"Failed to create synced table {name}: {exc}"
-            ) from exc
+            self._sleep(min(_POLL_INTERVAL_S, remaining))
 
     def trigger_refresh(self, name: str) -> str:
         """Kick off a Lakeflow update for this synced table; return the ``update_id``."""
@@ -362,6 +696,7 @@ class SyncedTableManager:
         timeout_s: int = DEFAULT_TIMEOUT_S,
         pipeline_update_id: Optional[str] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        on_state_change: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Block until the sync reaches a terminal state; raise on failure / timeout.
 
@@ -370,10 +705,16 @@ class SyncedTableManager:
         callers can flip the surrounding task to ``cancelled`` instead of
         observing a stale ``FAILED`` state from a pipeline that the user
         already abandoned.
+
+        ``on_state_change`` is called with the new state string whenever the
+        pipeline state transitions.  Callers can use this to forward progress
+        updates to the task manager UI without coupling this module to it.
         """
         deadline = time.time() + max(1, int(timeout_s))
         last_state = ""
         idle_pipeline_wait_done = False
+        # Track when we first saw MISSING/empty so we can bail out fast.
+        missing_since: Optional[float] = None
 
         uid = (pipeline_update_id or "").strip()
         if uid:
@@ -409,9 +750,39 @@ class SyncedTableManager:
 
             synced = self.get(name)
             state = self._extract_state(synced) if synced else "MISSING"
+
+            # Track how long the table has been absent / state-less.
+            if not state or state == "MISSING":
+                if missing_since is None:
+                    missing_since = time.time()
+                    logger.warning(
+                        "Synced table %s is %s — "
+                        "will bail out if still missing after %ds",
+                        name,
+                        state or "state-unknown",
+                        _MISSING_BAIL_S,
+                    )
+                elif time.time() - missing_since >= _MISSING_BAIL_S:
+                    raise InfrastructureError(
+                        f"Synced table {name!r} is still not visible "
+                        f"after {_MISSING_BAIL_S}s (state={state!r}). "
+                        f"The service principal may lack permission to create or "
+                        f"read the synced table, or the Lakebase API is "
+                        f"temporarily unavailable. "
+                        f"Check the Databricks workspace audit logs for the "
+                        f"synced-table API call."
+                    )
+            else:
+                missing_since = None  # reset if we got a real state
+
             if state and state != last_state:
                 logger.info("Synced table %s state=%s", name, state)
                 last_state = state
+                if on_state_change is not None:
+                    try:
+                        on_state_change(state)
+                    except Exception:  # noqa: BLE001
+                        pass
 
             if state in _TERMINAL_FAIL:
                 raise InfrastructureError(
@@ -475,20 +846,33 @@ class SyncedTableManager:
         timeout_s: int = DEFAULT_TIMEOUT_S,
         skip_initial_trigger: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
+        on_state_change: Optional[Callable[[str], None]] = None,
     ) -> str:
         """Convenience: ``trigger_refresh`` then ``wait_for_completion``.
 
         ``cancel_check`` is forwarded to :meth:`wait_for_completion` so
         long-running pipeline waits bail out promptly when the surrounding
         task is cancelled.
+
+        ``on_state_change`` is forwarded to :meth:`wait_for_completion` and
+        called on every pipeline state transition so callers can surface
+        live progress without polling.
         """
         update_id = ""
         if not skip_initial_trigger:
             try:
                 update_id = self.trigger_refresh(name)
+                logger.info(
+                    "Lakeflow refresh triggered for %s (update_id=%s)",
+                    name,
+                    update_id or "n/a",
+                )
             except (ValidationError, InfrastructureError) as exc:
-                logger.debug(
-                    "Could not trigger refresh on %s yet (will poll): %s", name, exc
+                logger.warning(
+                    "Could not trigger refresh on %s — will fall back to "
+                    "polling the synced-table state directly: %s",
+                    name,
+                    exc,
                 )
         uid = (update_id or "").strip()
         return self.wait_for_completion(
@@ -496,6 +880,7 @@ class SyncedTableManager:
             timeout_s=timeout_s,
             pipeline_update_id=uid or None,
             cancel_check=cancel_check,
+            on_state_change=on_state_change,
         )
 
     def _wait_for_pipeline_update(
@@ -571,15 +956,17 @@ class SyncedTableManager:
         sync_mode: str,
         create_database_objects_if_missing: bool,
     ) -> Any:
-        """Return a synced-table payload — SDK object when available, dict otherwise."""
-        if _SDK_DATABASE_AVAILABLE and _db_svc is not None:
-            return self._build_synced_table_sdk(
-                name=name,
-                source_table_full_name=source_table_full_name,
-                primary_key_columns=primary_key_columns,
-                sync_mode=sync_mode,
-                create_database_objects_if_missing=create_database_objects_if_missing,
-            )
+        """Return a synced-table payload as a plain dict.
+
+        We always use the dict form (not the SDK dataclass) because the
+        Lakebase Autoscaling API requires ``database_project`` +
+        ``database_branch`` for correct branch targeting, but the
+        ``databricks-sdk`` ``SyncedDatabaseTable`` model does not expose
+        those fields.  Passing an SDK object through ``_to_dict`` would
+        silently strip them via ``as_dict()``, causing the API to fall
+        back to the project's default (production) branch.  A plain dict
+        is passed straight through ``_to_dict`` with all fields intact.
+        """
         return self._build_synced_table_dict(
             name=name,
             source_table_full_name=source_table_full_name,
@@ -612,10 +999,15 @@ class SyncedTableManager:
             scheduling_policy=policy,
             create_database_objects_if_missing=create_database_objects_if_missing,
         )
+        # NOTE: _build_synced_table_payload always returns a plain dict now
+        # (see its docstring), so this method is never called from the hot path.
+        # It is kept for completeness.  The SDK SyncedDatabaseTable object does
+        # not expose database_branch, so we cannot use it for branch-targeted
+        # creation.
         return _db_svc.SyncedDatabaseTable(  # type: ignore[union-attr]
             name=name,
-            database_instance_name=self._instance,
-            logical_database_name=self._logical_db,
+            database_instance_name=self._project or None,
+            logical_database_name=self._logical_db or None,
             spec=spec,
         )
 
@@ -628,17 +1020,20 @@ class SyncedTableManager:
         sync_mode: str,
         create_database_objects_if_missing: bool,
     ) -> dict:
-        return {
-            "name": name,
-            "database_instance_name": self._instance,
-            "logical_database_name": self._logical_db,
-            "spec": {
-                "source_table_full_name": source_table_full_name,
-                "primary_key_columns": list(primary_key_columns),
-                "scheduling_policy": (sync_mode or "snapshot").upper(),
-                "create_database_objects_if_missing": create_database_objects_if_missing,
-            },
+        payload: dict = {"name": name}
+        if self._project:
+            payload["database_instance_name"] = self._project
+        if self._branch:
+            payload["database_branch"] = self._branch
+        if self._logical_db:
+            payload["logical_database_name"] = self._logical_db
+        payload["spec"] = {
+            "source_table_full_name": source_table_full_name,
+            "primary_key_columns": list(primary_key_columns),
+            "scheduling_policy": (sync_mode or "snapshot").upper(),
+            "create_database_objects_if_missing": create_database_objects_if_missing,
         }
+        return payload
 
     # -- SDK shape helpers ------------------------------------------------
 
@@ -668,8 +1063,26 @@ class SyncedTableManager:
         return "not found" in msg or "does not exist" in msg or "404" in msg
 
     @staticmethod
+    def _is_ghost_control_plane_state(exc: Exception) -> bool:
+        """Return True for the Lakebase control-plane "destination reserved" error.
+
+        This fires when the Postgres destination (schema + table) was reserved
+        by a previous synced-table setup that did not clean up properly at the
+        control-plane level.  GET and DELETE both return 404 (no UC registration
+        exists), but POST returns this error.  It is distinct from the normal
+        UC-registration 409 "already exists" response.
+        """
+        msg = str(exc).lower()
+        return "destination table" in msg and "already exists in schema" in msg
+
+    @staticmethod
     def _is_already_exists(exc: Exception) -> bool:
         msg = str(exc).lower()
+        # Exclude the Lakebase control-plane ghost-reservation error
+        # ("Destination table X already exists in schema Y") — that is handled
+        # by _is_ghost_control_plane_state / _GHOST_FALLBACK_SUFFIXES logic.
+        if "destination table" in msg and "already exists in schema" in msg:
+            return False
         return (
             "already exists" in msg
             or "already_exists" in msg

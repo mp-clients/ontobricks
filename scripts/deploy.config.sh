@@ -72,15 +72,16 @@ DEFAULT_WAREHOUSE_ID="d2096aa075ad44a3"
 DEFAULT_REGISTRY_CATALOG="benoit_cayla"
 DEFAULT_REGISTRY_SCHEMA="ontobricks_demo"
 DEFAULT_REGISTRY_VOLUME="registry"
-DEFAULT_LAKEBASE_PROJECT="ontobricks-app"
-DEFAULT_LAKEBASE_BRANCH="demo"
-DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT="db-8u4l-0na72ub5sp"
-DEFAULT_LAKEBASE_REGISTRY_SCHEMA="ontobricks_registry"
+DEFAULT_LAKEBASE_PROJECT="ontobricks-demo2"
+DEFAULT_LAKEBASE_BRANCH="production"
+# get this value with databricks postgres list-databases "projects/{DEFAULT_LAKEBASE_PROJECT}/branches/{DEFAULT_LAKEBASE_BRANCH}" -o json
+DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT="db-v6vc-8ibz5oeigo"
+DEFAULT_LAKEBASE_REGISTRY_SCHEMA="ontobricks_demo"
 
 # 3b. Lakebase GRANT bootstrap (registry side)
 # Only the database needs a literal default — instance and schema track
 # LAKEBASE_PROJECT and LAKEBASE_REGISTRY_SCHEMA respectively.
-DEFAULT_LAKEBASE_BOOTSTRAP_DATABASE="ontobricks_registry"
+DEFAULT_LAKEBASE_BOOTSTRAP_DATABASE="ontobricks_demo"
 
 # 3c. Lakebase GRANT bootstrap (Graph DB side)
 # Set these when the Graph DB lives on a DIFFERENT Lakebase Autoscaling
@@ -200,9 +201,10 @@ export APP_REGISTRY_VOLUME="${APP_REGISTRY_VOLUME:-$DEFAULT_APP_REGISTRY_VOLUME}
 # `bootstrap-lakebase-perms.sh`).
 export APP_LAKEBASE_SCHEMA="${APP_LAKEBASE_SCHEMA:-$LAKEBASE_REGISTRY_SCHEMA}"
 
-# Lakebase Postgres database (same value as the schema by convention;
-# overridden at runtime by PGDATABASE when the database resource is bound).
-export APP_LAKEBASE_DATABASE="${APP_LAKEBASE_DATABASE:-$LAKEBASE_REGISTRY_SCHEMA}"
+# Lakebase Postgres database name — must match the actual ``postgres_database``
+# of the bound ``db-…`` resource (i.e. the datname, not the schema name).
+# Use LAKEBASE_BOOTSTRAP_DATABASE which tracks the real datname.
+export APP_LAKEBASE_DATABASE="${APP_LAKEBASE_DATABASE:-$LAKEBASE_BOOTSTRAP_DATABASE}"
 
 # Lakebase project (autoscaling instance name) — informational in deployed app.
 export APP_LAKEBASE_PROJECT="${APP_LAKEBASE_PROJECT:-$LAKEBASE_PROJECT}"
@@ -210,6 +212,16 @@ export APP_LAKEBASE_PROJECT="${APP_LAKEBASE_PROJECT:-$LAKEBASE_PROJECT}"
 # Lakebase branch deployed to (used by LakebaseAuth host-resolution
 # fallback when PGHOST is not injected — e.g. local dev without binding).
 export APP_LAKEBASE_BRANCH="${APP_LAKEBASE_BRANCH:-$LAKEBASE_BRANCH}"
+
+# Lakebase managed-synced: UC catalog for the Lakeflow synced-table registration.
+# Leave empty to let OntoBricks auto-resolve the catalog from the registry
+# Volume config (recommended — the SP receives ALL_PRIVILEGES on the registry
+# catalog at deploy time via scripts/bootstrap-app-permissions.sh).
+# Override with a shared catalog name only if your registry catalog is not
+# accessible to the app service principal in production.
+# NOTE: intentionally NOT using ${APP_SYNC_UC_CATALOG:-} here so that a
+# stale shell export from a previous deploy never bleeds through.
+export APP_SYNC_UC_CATALOG=""
 
 # MLflow tracking URI (`databricks` = workspace tracking server).
 export APP_MLFLOW_TRACKING_URI="${APP_MLFLOW_TRACKING_URI:-$DEFAULT_APP_MLFLOW_TRACKING_URI}"

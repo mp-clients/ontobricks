@@ -277,11 +277,19 @@ if [[ "$TARGET" == *lakebase* ]]; then
     echo ""
     echo "--- Lakebase schema permissions ---"
     chmod +x scripts/bootstrap-lakebase-perms.sh
+    # Pass the registry catalog so bootstrap also grants UC ALL_PRIVILEGES —
+    # required for the SP to read back synced tables via the Lakebase API.
+    _UC_CATALOG_ARG=()
+    if [[ -n "${REGISTRY_CATALOG:-}" ]]; then
+        _UC_CATALOG_ARG=(-c "$REGISTRY_CATALOG")
+    fi
+
     if ! scripts/bootstrap-lakebase-perms.sh \
             -i "$LAKEBASE_BOOTSTRAP_INSTANCE" \
             -b "$LAKEBASE_BOOTSTRAP_BRANCH" \
             -d "$LAKEBASE_BOOTSTRAP_DATABASE" \
             -s "$LAKEBASE_BOOTSTRAP_SCHEMA" \
+            "${_UC_CATALOG_ARG[@]}" \
             -a "$APP_NAME" \
             -a "$MCP_APP_NAME"; then
         echo ""
@@ -293,6 +301,7 @@ if [[ "$TARGET" == *lakebase* ]]; then
         echo "        -b $LAKEBASE_BOOTSTRAP_BRANCH \\"
         echo "        -d $LAKEBASE_BOOTSTRAP_DATABASE \\"
         echo "        -s $LAKEBASE_BOOTSTRAP_SCHEMA \\"
+        echo "        ${_UC_CATALOG_ARG[*]:+-c $REGISTRY_CATALOG \\}"
         echo "        -a $APP_NAME -a $MCP_APP_NAME"
     fi
 
@@ -314,6 +323,7 @@ if [[ "$TARGET" == *lakebase* ]]; then
             -b "$_GRAPH_BRANCH" \
             -d "$_GRAPH_DATABASE" \
             -s "$LAKEBASE_GRAPH_SCHEMA" \
+            "${_UC_CATALOG_ARG[@]}" \
             -a "$APP_NAME" \
             -a "$MCP_APP_NAME" 2>&1 || true
     fi
@@ -330,6 +340,7 @@ if [[ "$TARGET" == *lakebase* ]]; then
             -b "$_GRAPH_BRANCH" \
             -d "$_GRAPH_DATABASE" \
             -s "$LAKEBASE_SYNC_SCHEMA" \
+            "${_UC_CATALOG_ARG[@]}" \
             -a "$APP_NAME" \
             -a "$MCP_APP_NAME" 2>&1 || true
     fi

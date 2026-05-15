@@ -85,7 +85,29 @@ def ensure_union_view(
 
     The synced side is NULL-padded for ``datatype`` / ``lang`` so the view
     has a uniform 5-column shape regardless of which side a row came from.
+
+    If ``view`` already exists as a TABLE (e.g. from an old app-managed build
+    before the managed_synced migration), it is dropped first — Postgres's
+    ``CREATE OR REPLACE VIEW`` cannot replace a table with a view.
     """
+    # Drop any stale TABLE that occupies the view name before (re)creating the view.
+    # ``CREATE OR REPLACE VIEW`` cannot replace a table — it only replaces views.
+    # We check pg_class using the unqualified name and the current search_path schema
+    # so this works regardless of whether the caller schema-qualifies the name.
+    bare_name = view.split(".")[-1].strip('"')
+    cur.execute(
+        "DO $$ BEGIN "
+        "  IF EXISTS ("
+        "    SELECT 1 FROM pg_class c "
+        "    JOIN pg_namespace n ON n.oid = c.relnamespace "
+        f"    WHERE c.relname = {bare_name!r} "
+        "      AND n.nspname = ANY(current_schemas(false)) "
+        "      AND c.relkind = 'r'"
+        "  ) THEN "
+        f"    EXECUTE 'DROP TABLE IF EXISTS {view} CASCADE'; "
+        "  END IF; "
+        "END $$"
+    )
     sql = (
         f"CREATE OR REPLACE VIEW {view} AS "
         f"SELECT subject, predicate, object, "

@@ -32,8 +32,8 @@ def _make_manager(client: MagicMock, sleeps: list | None = None) -> SyncedTableM
     if sleeps is None:
         sleeps = []
     return SyncedTableManager(
-        database_instance_name="proj-123",
-        logical_database_name="appdb",
+        project_name="proj-123",
+        branch_name="demo",
         client_factory=lambda: client,
         sleep=lambda s: sleeps.append(s),
     )
@@ -116,7 +116,9 @@ class TestEnsure:
 
     def test_ensure_creates_when_missing(self):
         client = MagicMock()
-        client.database.get_synced_database_table.return_value = None
+        # First call: table not found (existence check before create).
+        # Second call onwards: table is visible (post-create visibility poll).
+        client.database.get_synced_database_table.side_effect = [None, _synced()]
         client.database.create_synced_database_table.return_value = _synced()
 
         mgr = _make_manager(client)
@@ -144,25 +146,26 @@ class TestEnsure:
             "object",
         ]
         assert captured["payload"]["sync_mode"] == "snapshot"
-        # The database / logical-db identifiers are wired in via the
-        # manager's constructor and asserted through the manager attributes.
-        assert mgr._instance == "proj-123"
-        assert mgr._logical_db == "appdb"
+        # project/branch are instance attrs consumed by the builder internals.
+        assert mgr._project == "proj-123"
+        assert mgr._branch == "demo"
 
     def test_ensure_swallows_already_exists_race(self):
         client = MagicMock()
-        # First get_synced returns None (not yet there); after the failed
-        # create the second get_synced returns the racing winner.
+        # Initial GET → None; POST → 409 "already exists"; ownership probe
+        # GET → returns the table on first probe attempt (table became visible
+        # before the probe loop times out, so we return early without delete).
         client.database.get_synced_database_table.side_effect = [
-            None,
-            _synced(),
+            None,      # initial ensure() check
+            _synced(), # first ownership-probe GET → found → early return
         ]
         client.database.create_synced_database_table.side_effect = RuntimeError(
             "ALREADY_EXISTS: cat.sch.tab"
         )
 
         mgr = _make_manager(client)
-        with mock_method(
+        # Patch _sleep so the probe loop doesn't actually wait 30 s.
+        with mock_method(mgr, "_sleep"), mock_method(
             mgr, "_build_synced_table_payload", return_value=SimpleNamespace()
         ):
             out = mgr.ensure(
@@ -170,7 +173,7 @@ class TestEnsure:
                 source_table_full_name="cat.sch.view",
                 primary_key_columns=["subject", "predicate", "object"],
             )
-        assert out is not None  # second get_synced returned the racing winner
+        assert out is not None  # ownership-probe returned the winner
 
 
 # ---------------------------------------------------------------

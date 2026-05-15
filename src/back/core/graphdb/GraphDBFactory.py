@@ -150,24 +150,31 @@ class GraphDBFactory:
 
     @staticmethod
     def _build_synced_manager(auth: Any, database_override: str) -> Optional[Any]:
-        """Resolve Lakebase project_id + logical DB name and build a SyncedTableManager.
+        """Build a SyncedTableManager with Autoscaling project + branch targeting.
 
-        Returns *None* if either piece is missing -- callers should fall back
-        to ``app_managed`` and surface a warning rather than aborting the
-        store construction.
+        Passes ``database_project`` + ``database_branch`` (not
+        ``database_instance_name``) so the Lakebase control-plane creates the
+        synced table in the exact branch the catalog is connected to (e.g.
+        ``demo``) rather than the project's default/production branch.
         """
         try:
             from back.core.graphdb.lakebase.SyncedTableManager import (
                 SyncedTableManager,
             )
 
-            instance_name = auth.instance_name  # raises ValidationError on miss
+            project_name = auth.instance_name  # e.g. "ontobricks-app"
+            branch_name = auth.branch_name      # e.g. "demo"
             logical_db = (database_override or auth.database or "").strip()
-            if not instance_name or not logical_db:
-                return None
+            logger.info(
+                "Building SyncedTableManager for project=%r branch=%r logical_db=%r",
+                project_name,
+                branch_name,
+                logical_db,
+            )
             return SyncedTableManager(
-                database_instance_name=instance_name,
-                logical_database_name=logical_db,
+                project_name=project_name,
+                branch_name=branch_name,
+                logical_db=logical_db,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

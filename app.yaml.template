@@ -94,6 +94,14 @@ env:
     value: "${APP_LAKEBASE_DATABASE}"
   - name: LAKEBASE_BRANCH
     value: "${APP_LAKEBASE_BRANCH}"
+  # Lakebase managed-synced: UC catalog for the Lakeflow synced-table
+  # registration.  Defaults (when empty) to the registry Volume catalog,
+  # which is the personal catalog of the deploying user and may not be
+  # accessible by the app service principal.  Set this to a shared/workspace
+  # catalog (e.g. "main") when the SP does not have CREATE SCHEMA on the
+  # user's personal catalog.
+  - name: ONTOBRICKS_SYNC_UC_CATALOG  # optional
+    value: "${APP_SYNC_UC_CATALOG}"
   # MLflow — ensure traces are persisted to the workspace tracking server.
   - name: MLFLOW_TRACKING_URI
     value: "${APP_MLFLOW_TRACKING_URI}"

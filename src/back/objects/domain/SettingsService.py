@@ -201,7 +201,11 @@ class SettingsService:
                 data["warehouse_id"],
             )
             if not ok:
-                logger.info("Warehouse saved in session only (global: %s)", msg)
+                logger.warning(
+                    "Warehouse saved in session only (global config write failed: %s). "
+                    "Session fallback active — catalog dropdown will still work.",
+                    msg,
+                )
 
         domain.save()
         return {"success": True, "message": "Configuration saved"}
@@ -299,8 +303,9 @@ class SettingsService:
             warehouse_id,
         )
         if not ok:
-            logger.info(
-                "Warehouse stored in session only (global save failed: %s)",
+            logger.warning(
+                "Warehouse stored in session only (global save failed: %s). "
+                "Session fallback active — catalog dropdown will still work.",
                 msg,
             )
             return {
@@ -1334,13 +1339,19 @@ class SettingsService:
         """
         out: Dict[str, Any] = {"success": False, "catalogs": [], "message": ""}
         try:
-            _, host, token, registry_cfg = SettingsService._resolve_context(
+            domain, host, token, registry_cfg = SettingsService._resolve_context(
                 session_mgr, settings
             )
             global_config_service.load(host, token, registry_cfg, force=True)
             warehouse_id = global_config_service.get_warehouse_id(
                 host, token, registry_cfg
             )
+            if not warehouse_id:
+                warehouse_id = (
+                    (domain.databricks or {}).get("warehouse_id") or ""
+                )
+            if not warehouse_id:
+                warehouse_id = settings.sql_warehouse_id or ""
             if not warehouse_id:
                 out["message"] = (
                     "Configure a SQL warehouse under Settings → Databricks first."
@@ -1517,6 +1528,264 @@ class SettingsService:
             return out
 
     @staticmethod
+    def _lakebase_kwargs_for_branch(
+        branch_path: str,
+        database: str,
+        application_name: str,
+    ) -> Dict[str, Any]:
+        """Resolve psycopg connect kwargs directly from a Lakebase branch resource path.
+
+        Uses the Databricks API to find the primary endpoint for ``branch_path``
+        (format ``projects/<proj>/branches/<branch>``), mints a fresh JWT, and
+        returns kwargs ready to pass to ``psycopg.connect()``.
+        Raises on any resolution failure so the caller can return a clean error.
+        """
+        import os
+
+        from databricks.sdk import WorkspaceClient
+
+        w = WorkspaceClient()
+        api = getattr(w, "api_client", None)
+        if api is None or not hasattr(api, "do"):
+            raise RuntimeError("Databricks SDK api_client unavailable")
+
+        endpoints = (
+            api.do("GET", f"/api/2.0/postgres/{branch_path}/endpoints") or {}
+        ).get("endpoints") or []
+
+        host = ""
+        endpoint_resource = ""
+        for ep in endpoints:
+            h = ((ep.get("status") or {}).get("hosts") or {}).get("host", "").strip()
+            if h:
+                host = h
+                endpoint_resource = ep.get("name") or ""
+                break
+
+        if not host:
+            raise RuntimeError(
+                f"No active endpoint found for branch path {branch_path!r}"
+            )
+
+        token_resp = api.do(
+            "POST",
+            "/api/2.0/postgres/credentials",
+            body={"endpoint": endpoint_resource},
+        ) or {}
+        jwt = token_resp.get("token", "")
+        if not jwt:
+            raise RuntimeError(
+                f"Failed to mint Lakebase JWT for endpoint {endpoint_resource!r}"
+            )
+
+        pguser = os.environ.get("PGUSER", "").strip()
+        if not pguser:
+            raise RuntimeError(
+                "PGUSER is not set — required for Lakebase psycopg connections"
+            )
+
+        kwargs: Dict[str, Any] = {
+            "host": host,
+            "port": int(os.environ.get("PGPORT", "5432")),
+            "user": pguser,
+            "password": jwt,
+            "dbname": database or "postgres",
+            "sslmode": "require",
+            "connect_timeout": 10,
+            "application_name": application_name,
+        }
+        return kwargs
+
+    @staticmethod
+    def graph_engine_lakebase_objects_result(
+        database: str,
+        branch_path: str,
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """List all user schemas, tables and views in a Lakebase database.
+
+        Uses ``branch_path`` (the form's current branch selection) when provided
+        so the result reflects the live form state rather than the saved config.
+        Falls back to the bound Lakebase auth when ``branch_path`` is empty.
+        Returns the Postgres ``current_user`` so the frontend can display it.
+        Never raises — failures become ``success=False``.
+        """
+        out: Dict[str, Any] = {
+            "success": False,
+            "current_user": "",
+            "schemas": [],
+            "tables": [],
+            "views": [],
+            "message": "",
+        }
+        try:
+            from back.core.graphdb.lakebase.pool import _require_psycopg
+
+            psycopg, _ = _require_psycopg()
+
+            if branch_path:
+                kwargs = SettingsService._lakebase_kwargs_for_branch(
+                    branch_path, database, "ontobricks-obj-list"
+                )
+            else:
+                from back.core.databricks import get_lakebase_auth
+
+                auth = get_lakebase_auth()
+                if not auth.is_available:
+                    out["message"] = (
+                        "Lakebase resource not bound "
+                        "(LAKEBASE_PROJECT/LAKEBASE_BRANCH/PGUSER missing)"
+                    )
+                    return out
+                kwargs = auth.kwargs(application_name="ontobricks-obj-list")
+                if database:
+                    kwargs["dbname"] = database
+            with psycopg.connect(**kwargs) as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT current_user")
+                    out["current_user"] = (cur.fetchone() or ("",))[0]
+
+                    cur.execute(
+                        """
+                        SELECT nspname,
+                               pg_catalog.pg_get_userbyid(nspowner) AS owner
+                        FROM pg_catalog.pg_namespace
+                        WHERE nspname NOT LIKE 'pg_%%'
+                          AND nspname NOT IN ('information_schema')
+                          AND pg_catalog.pg_get_userbyid(nspowner) = current_user
+                        ORDER BY nspname
+                        """
+                    )
+                    out["schemas"] = [
+                        {"name": r[0], "owner": r[1]} for r in cur.fetchall()
+                    ]
+
+                    cur.execute(
+                        """
+                        SELECT t.schemaname,
+                               t.tablename,
+                               pg_catalog.pg_get_userbyid(c.relowner) AS owner
+                        FROM pg_catalog.pg_tables t
+                        JOIN pg_catalog.pg_class c
+                             ON c.relname = t.tablename
+                        JOIN pg_catalog.pg_namespace n
+                             ON n.oid = c.relnamespace
+                            AND n.nspname = t.schemaname
+                        WHERE t.schemaname NOT LIKE 'pg_%%'
+                          AND t.schemaname NOT IN ('information_schema')
+                          AND pg_catalog.pg_get_userbyid(c.relowner) = current_user
+                        ORDER BY t.schemaname, t.tablename
+                        """
+                    )
+                    out["tables"] = [
+                        {"schema": r[0], "name": r[1], "owner": r[2]}
+                        for r in cur.fetchall()
+                    ]
+
+                    cur.execute(
+                        """
+                        SELECT v.schemaname,
+                               v.viewname,
+                               pg_catalog.pg_get_userbyid(c.relowner) AS owner
+                        FROM pg_catalog.pg_views v
+                        JOIN pg_catalog.pg_class c
+                             ON c.relname = v.viewname
+                        JOIN pg_catalog.pg_namespace n
+                             ON n.oid = c.relnamespace
+                            AND n.nspname = v.schemaname
+                        WHERE v.schemaname NOT LIKE 'pg_%%'
+                          AND v.schemaname NOT IN ('information_schema')
+                          AND pg_catalog.pg_get_userbyid(c.relowner) = current_user
+                        ORDER BY v.schemaname, v.viewname
+                        """
+                    )
+                    out["views"] = [
+                        {"schema": r[0], "name": r[1], "owner": r[2]}
+                        for r in cur.fetchall()
+                    ]
+
+            out["success"] = True
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_objects failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
+    def graph_engine_lakebase_drop_object_result(
+        kind: str,
+        schema: str,
+        name: str,
+        database: str,
+        branch_path: str,
+        session_mgr: SessionManager,
+        settings: Settings,
+    ) -> Dict[str, Any]:
+        """Drop a Postgres schema, table or view in the connected Lakebase database.
+
+        ``kind`` must be one of ``schema``, ``table``, ``view``.
+        Schemas are dropped with CASCADE.  Uses ``branch_path`` when provided
+        so the drop targets the form's current connection, not the saved config.
+        Never raises — failures become ``success=False``.
+        """
+        out: Dict[str, Any] = {"success": False, "message": ""}
+        allowed_kinds = {"schema", "table", "view"}
+        if kind not in allowed_kinds:
+            out["message"] = f"kind must be one of {allowed_kinds}, got: {kind!r}"
+            return out
+
+        def _q(ident: str) -> str:
+            return '"' + ident.replace('"', '""') + '"'
+
+        if kind == "schema":
+            ddl = f"DROP SCHEMA {_q(name)} CASCADE"
+        elif kind == "table":
+            if not schema:
+                out["message"] = "schema is required for kind=table"
+                return out
+            ddl = f"DROP TABLE {_q(schema)}.{_q(name)}"
+        else:
+            if not schema:
+                out["message"] = "schema is required for kind=view"
+                return out
+            ddl = f"DROP VIEW {_q(schema)}.{_q(name)}"
+
+        try:
+            from back.core.graphdb.lakebase.pool import _require_psycopg
+
+            psycopg, _ = _require_psycopg()
+
+            if branch_path:
+                kwargs = SettingsService._lakebase_kwargs_for_branch(
+                    branch_path, database, "ontobricks-obj-drop"
+                )
+            else:
+                from back.core.databricks import get_lakebase_auth
+
+                auth = get_lakebase_auth()
+                if not auth.is_available:
+                    out["message"] = (
+                        "Lakebase resource not bound "
+                        "(LAKEBASE_PROJECT/LAKEBASE_BRANCH/PGUSER missing)"
+                    )
+                    return out
+                kwargs = auth.kwargs(application_name="ontobricks-obj-drop")
+                if database:
+                    kwargs["dbname"] = database
+
+            with psycopg.connect(**kwargs) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(ddl)
+            out["success"] = True
+            out["message"] = f"Dropped {kind}: {ddl}"
+            return out
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("graph_engine_lakebase_drop_object failed: %s", exc)
+            out["message"] = str(exc)
+            return out
+
+    @staticmethod
     def graph_engine_uc_schemas_result(
         catalog: str,
         session_mgr: SessionManager,
@@ -1528,13 +1797,19 @@ class SettingsService:
             out["message"] = "catalog is required"
             return out
         try:
-            _, host, token, registry_cfg = SettingsService._resolve_context(
+            domain, host, token, registry_cfg = SettingsService._resolve_context(
                 session_mgr, settings
             )
             global_config_service.load(host, token, registry_cfg, force=True)
             warehouse_id = global_config_service.get_warehouse_id(
                 host, token, registry_cfg
             )
+            if not warehouse_id:
+                warehouse_id = (
+                    (domain.databricks or {}).get("warehouse_id") or ""
+                )
+            if not warehouse_id:
+                warehouse_id = settings.sql_warehouse_id or ""
             if not warehouse_id:
                 out["message"] = "Configure a SQL warehouse under Settings → Databricks first."
                 return out

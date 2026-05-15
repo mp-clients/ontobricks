@@ -499,7 +499,8 @@ ingest in synced mode:
 1. Resolve the synced UC FQN as `<catalog>.<schema>.<base>_sync` where
    *catalog* is: ``graph_engine_config.sync_uc_catalog`` if set; otherwise
    ``resolve_sync_uc_fallback_catalog`` — optional deployment env
-   ``ONTBRICKS_SYNC_UC_CATALOG``, then **Settings → Registry** UC catalog,
+   ``ONTOBRICKS_SYNC_UC_CATALOG`` (legacy ``ONTBRICKS_*`` still honoured),
+   then **Settings → Registry** UC catalog,
    then ``domain.delta.catalog`` (per-domain Delta catalog). This avoids
    registering the synced table under a personal/home UC catalog when the
    registry triplet points at the team catalog.

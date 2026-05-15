@@ -580,7 +580,7 @@ class TestResolveSyncUcFallbackCatalog:
             resolve_sync_uc_fallback_catalog,
         )
 
-        monkeypatch.setenv("ONTBRICKS_SYNC_UC_CATALOG", "shared_team_catalog")
+        monkeypatch.setenv("ONTOBRICKS_SYNC_UC_CATALOG", "shared_team_catalog")
 
         domain = SimpleNamespace(settings={"registry": {}})
         settings = SimpleNamespace()
@@ -594,4 +594,28 @@ class TestResolveSyncUcFallbackCatalog:
                 {"catalog": "benoit_cayla"},
             )
         assert out == "shared_team_catalog"
+
+    def test_env_legacy_typoed_var_still_works_with_warning(self, monkeypatch):
+        """Backwards-compat: the legacy ``ONTBRICKS_*`` spelling is still honoured."""
+        from types import SimpleNamespace
+
+        from back.core.graphdb.lakebase.LakebaseFlatStore import (
+            resolve_sync_uc_fallback_catalog,
+        )
+
+        monkeypatch.delenv("ONTOBRICKS_SYNC_UC_CATALOG", raising=False)
+        monkeypatch.setenv("ONTBRICKS_SYNC_UC_CATALOG", "legacy_catalog")
+
+        domain = SimpleNamespace(settings={"registry": {}})
+        settings = SimpleNamespace()
+        with patch(
+            "back.objects.registry.RegistryCfg.from_domain",
+            return_value=MagicMock(catalog="team_catalog", schema="s", volume="v"),
+        ):
+            out = resolve_sync_uc_fallback_catalog(
+                domain,
+                settings,
+                {"catalog": "benoit_cayla"},
+            )
+        assert out == "legacy_catalog"
 

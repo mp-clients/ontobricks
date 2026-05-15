@@ -137,6 +137,31 @@ class LakebaseAuth:
         return user
 
     @property
+    def branch_name(self) -> str:
+        """Return the branch name extracted from the resolved endpoint resource path.
+
+        Forces endpoint resolution via :attr:`instance_name` (cached) so the
+        value is available even when the caller only checked ``instance_name``
+        previously.  Returns an empty string when the endpoint path cannot be
+        parsed (e.g. provisioned legacy instances).
+
+        Endpoint resource path format:
+        ``projects/<project_id>/branches/<branch_id>/endpoints/<endpoint_id>``
+        """
+        # Trigger resolution so _endpoint_resource is populated.
+        try:
+            _ = self.instance_name
+        except Exception:  # noqa: BLE001
+            return ""
+        if not self._endpoint_resource:
+            return ""
+        parts = self._endpoint_resource.split("/")
+        # Expected: ["projects", "<proj>", "branches", "<branch>", "endpoints", "<ep>"]
+        if len(parts) >= 4 and parts[0] == "projects" and parts[2] == "branches":
+            return parts[3]
+        return ""
+
+    @property
     def is_available(self) -> bool:
         """Return True when the Lakebase connection can be established.
 

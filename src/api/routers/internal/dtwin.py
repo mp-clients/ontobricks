@@ -6,7 +6,7 @@ Moved from app/frontend/digitaltwin/routes.py during the front/back split.
 
 from dataclasses import dataclass
 import time
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Request, Depends
 from back.core.logging import get_logger
@@ -213,23 +213,45 @@ async def start_triplestore_sync(
     delta_cfg = domain.delta or {}
     domain_snap = DomainSnapshot(domain)
 
+    # Detect managed-synced mode using the same authoritative path as
+    # _build_pipeline._resolve_lakebase_mode so the task step-list always
+    # matches what the pipeline will actually execute.
+    #
+    # Previously this read only the domain.settings["registry"] mirror which
+    # is absent when GlobalConfigService is the sole persistence layer
+    # (common in the deployed App where the mirror write never fires).
+    try:
+        from back.core.triplestore.TripleStoreFactory import TripleStoreFactory
+
+        _engine = TripleStoreFactory._resolve_graph_engine(domain, settings) or ""
+        _ecfg = TripleStoreFactory._resolve_graph_engine_config(domain, settings) or {}
+    except Exception:  # noqa: BLE001
+        _engine = ""
+        _ecfg = {}
+    _is_synced_mode = _engine == "lakebase" and _ecfg.get("sync_mode") == "managed_synced"
+
+    if _is_synced_mode:
+        _graph_steps = [
+            {"name": "uc_schema",       "description": "Ensuring Unity Catalog schema"},
+            {"name": "sync_register",   "description": "Registering synced table in Unity Catalog"},
+            {"name": "sync_companion",  "description": "Creating companion table"},
+            {"name": "sync_data",       "description": "Syncing data from Delta (Lakeflow)"},
+            {"name": "union_view",      "description": "Creating knowledge graph union view"},
+            {"name": "finalize",        "description": "Finalizing knowledge graph"},
+        ]
+    else:
+        _graph_steps = [
+            {"name": "graph", "description": "Updating the knowledge graph"},
+        ]
+
     tm = get_task_manager()
     task = tm.create_task(
         name="Digital Twin Build",
         task_type="triplestore_sync",
         steps=[
-            {
-                "name": "prepare",
-                "description": "Preparing mappings and generating queries",
-            },
-            {
-                "name": "view",
-                "description": "Creating the Digital Twin view",
-            },
-            {
-                "name": "graph",
-                "description": "Updating the knowledge graph",
-            },
+            {"name": "prepare", "description": "Preparing mappings and generating queries"},
+            {"name": "view",    "description": "Creating the Digital Twin view"},
+            *_graph_steps,
         ],
     )
 
@@ -1700,8 +1722,8 @@ async def dtwin_graphql_execute(
 
 @router.get("/triples/find")
 async def dtwin_triples_find(
-    entity_type: str | None = None,
-    search: str | None = None,
+    entity_type: Optional[str] = None,
+    search: Optional[str] = None,
     depth: int = 1,
     limit: int = 1000,
     offset: int = 0,

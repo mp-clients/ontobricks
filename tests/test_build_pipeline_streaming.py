@@ -11,6 +11,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from back.core.triplestore.TripleStoreFactory import TripleStoreFactory
 from back.objects.digitaltwin._build_pipeline import _BuildPipeline
 
 
@@ -135,6 +136,8 @@ class TestFullRebuildProgressMessage:
 class TestApplyViaSyncedPipeline:
     """In synced mode, the app must trigger Lakeflow and never iterate triples."""
 
+    _SYNCED_UC = "cat.ontobricks_graph.g_v1_sync"
+
     def _synced_pipe(self) -> _BuildPipeline:
         pipe = _bare_pipeline(_is_lakebase_synced=True)
         pipe.store.is_synced = True
@@ -142,14 +145,22 @@ class TestApplyViaSyncedPipeline:
         pipe.store.sync_timeout_s = 600
         pipe.store.sync_uc_catalog = ""
         pipe.store.graph_schema = "ontobricks_graph"
-        pipe.store.synced_uc_name.return_value = "cat.ontobricks_graph.g_v1_sync"
+        pipe.store.synced_uc_name.return_value = self._SYNCED_UC
         mgr = MagicMock()
+        # ensure() must return an object whose .name matches synced_uc so the
+        # build pipeline doesn't treat it as a ghost-state fallback.
+        _ensure_ret = MagicMock()
+        _ensure_ret.name = self._SYNCED_UC
+        mgr.ensure.return_value = _ensure_ret
         pipe.store.synced_manager.return_value = mgr
         pipe.store.ensure_synced_companion = MagicMock()
         pipe.store.ensure_synced_union_view = MagicMock()
         pipe.store.truncate_companion = MagicMock()
         pipe._count_view_triples = MagicMock(return_value=1234)
         pipe._mgr = mgr
+        # _raise_if_cancelled calls tm.is_cancelled(); return False so cancel
+        # checks don't abort the pipeline in unit tests.
+        pipe.tm.is_cancelled.return_value = False
         return pipe
 
     def test_synced_calls_ensure_trigger_and_truncate_companion(self):
@@ -168,7 +179,10 @@ class TestApplyViaSyncedPipeline:
         ]
         assert ensure_kwargs["sync_mode"] == "snapshot"
         pipe.store.ensure_synced_companion.assert_called_once_with(pipe.graph_name)
-        pipe.store.ensure_synced_union_view.assert_called_once_with(pipe.graph_name)
+        # synced_phy_override=None because actual name == requested name (no fallback).
+        pipe.store.ensure_synced_union_view.assert_called_once_with(
+            pipe.graph_name, synced_phy_override=None
+        )
         pipe._mgr.trigger_and_wait.assert_called_once()
         pipe.store.truncate_companion.assert_called_once_with(pipe.graph_name)
         # CRITICAL: app never iterates triples in synced mode.
@@ -195,16 +209,8 @@ class TestResolveLakebaseMode:
         pipe = _bare_pipeline()
 
         with (
-            patch(
-                "back.core.triplestore.TripleStoreFactory.TripleStoreFactory."
-                "_resolve_graph_engine",
-                return_value="lakebase",
-            ),
-            patch(
-                "back.core.triplestore.TripleStoreFactory.TripleStoreFactory."
-                "_resolve_graph_engine_config",
-                return_value={"sync_mode": "managed_synced"},
-            ),
+            patch.object(TripleStoreFactory, "_resolve_graph_engine", return_value="lakebase"),
+            patch.object(TripleStoreFactory, "_resolve_graph_engine_config", return_value={"sync_mode": "managed_synced"}),
         ):
             pipe._resolve_lakebase_mode()
 
@@ -215,16 +221,8 @@ class TestResolveLakebaseMode:
         pipe = _bare_pipeline()
 
         with (
-            patch(
-                "back.core.triplestore.TripleStoreFactory.TripleStoreFactory."
-                "_resolve_graph_engine",
-                return_value="lakebase",
-            ),
-            patch(
-                "back.core.triplestore.TripleStoreFactory.TripleStoreFactory."
-                "_resolve_graph_engine_config",
-                return_value={},
-            ),
+            patch.object(TripleStoreFactory, "_resolve_graph_engine", return_value="lakebase"),
+            patch.object(TripleStoreFactory, "_resolve_graph_engine_config", return_value={}),
         ):
             pipe._resolve_lakebase_mode()
 
@@ -235,16 +233,8 @@ class TestResolveLakebaseMode:
         pipe = _bare_pipeline()
 
         with (
-            patch(
-                "back.core.triplestore.TripleStoreFactory.TripleStoreFactory."
-                "_resolve_graph_engine",
-                return_value="other",
-            ),
-            patch(
-                "back.core.triplestore.TripleStoreFactory.TripleStoreFactory."
-                "_resolve_graph_engine_config",
-                return_value={"sync_mode": "managed_synced"},
-            ),
+            patch.object(TripleStoreFactory, "_resolve_graph_engine", return_value="other"),
+            patch.object(TripleStoreFactory, "_resolve_graph_engine_config", return_value={"sync_mode": "managed_synced"}),
         ):
             pipe._resolve_lakebase_mode()
 

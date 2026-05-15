@@ -910,6 +910,149 @@ document.addEventListener('DOMContentLoaded', function () {
 
     document.getElementById('btnRefreshLakebaseGraphHealth')?.addEventListener('click', () => loadLakebaseGraphHealth());
 
+    // ── Lakebase objects (schemas / tables / views) ──────────────────────────
+    async function loadLakebaseObjects() {
+        const btn        = document.getElementById('btnLoadLakebaseObjects');
+        const result     = document.getElementById('lakebaseObjectsResult');
+        const dbSel      = document.getElementById('lakebaseGraphDb');
+        const branchSel  = document.getElementById('lakebaseBranch');
+        if (!result) return;
+
+        const database   = dbSel?.value   || '';
+        const branchPath = branchSel?.value || '';
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Loading…';
+        }
+        result.innerHTML = '';
+
+        try {
+            const params = new URLSearchParams();
+            if (database)   params.set('database',    database);
+            if (branchPath) params.set('branch_path', branchPath);
+            const url = '/settings/graph-engine/lakebase-objects'
+                + (params.toString() ? '?' + params.toString() : '');
+            const resp = await fetch(url, { credentials: 'same-origin' });
+            const data = resp.ok ? await resp.json() : {};
+            if (!data.success) {
+                result.innerHTML = '<div class="alert alert-warning small py-2 mt-2">'
+                    + escapeHtmlSettings(data.message || 'Failed to load objects') + '</div>';
+                return;
+            }
+
+            const cu = data.current_user || '';
+            const schemas = data.schemas || [];
+            const tables  = data.tables  || [];
+            const views   = data.views   || [];
+
+            if (schemas.length === 0 && tables.length === 0 && views.length === 0) {
+                result.innerHTML = '<p class="small text-muted mt-2">No objects owned by you in this database.</p>';
+                return;
+            }
+
+            function mkDropBtn(kind, schema, name) {
+                return '<button type="button" class="btn btn-danger btn-sm py-0 px-2"'
+                    + ' onclick="window._lkDropObject(' + JSON.stringify(kind) + ','
+                    + JSON.stringify(schema) + ',' + JSON.stringify(name) + ','
+                    + JSON.stringify(database) + ',' + JSON.stringify(branchPath) + ')">'
+                    + '<i class="bi bi-trash"></i></button>';
+            }
+
+            function mkRows(items, kindLabel, schemaKey, nameKey) {
+                return items.map(function (o) {
+                    const schema  = o[schemaKey] || '';
+                    const name    = o[nameKey]   || '';
+                    const kindVal = kindLabel.toLowerCase();
+                    return '<tr>'
+                        + '<td><span class="badge bg-secondary-subtle text-secondary-emphasis border">'
+                        + escapeHtmlSettings(kindLabel) + '</span></td>'
+                        + '<td class="font-monospace small">' + escapeHtmlSettings(schema) + '</td>'
+                        + '<td class="font-monospace small">' + escapeHtmlSettings(name) + '</td>'
+                        + '<td class="text-center">' + mkDropBtn(kindVal, schema, name) + '</td>'
+                        + '</tr>';
+                }).join('');
+            }
+
+            const html = '<p class="small text-muted mt-2 mb-1">Connected as: <code>'
+                + escapeHtmlSettings(cu) + '</code> — showing only objects you own.</p>'
+                + '<table class="table table-sm table-bordered small mt-2 mb-0">'
+                + '<thead class="table-light"><tr>'
+                + '<th>Type</th><th>Schema</th><th>Name</th><th>Action</th>'
+                + '</tr></thead><tbody>'
+                + mkRows(schemas, 'Schema', 'name',   'name')
+                + mkRows(tables,  'Table',  'schema',  'name')
+                + mkRows(views,   'View',   'schema',  'name')
+                + '</tbody></table>';
+            result.innerHTML = html;
+        } catch (e) {
+            result.innerHTML = '<div class="alert alert-danger small py-2 mt-2">'
+                + escapeHtmlSettings(e.message || 'Network error') + '</div>';
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '<i class="bi bi-arrow-clockwise me-1"></i> Load objects';
+            }
+        }
+    }
+
+    async function _execDrop(kind, schema, name, database, branchPath) {
+        const label = kind === 'schema' ? '"' + name + '"' : '"' + schema + '"."' + name + '"';
+        const result = document.getElementById('lakebaseObjectsResult');
+        try {
+            const resp = await fetch('/settings/graph-engine/lakebase-drop-object', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
+                body: JSON.stringify({ kind, schema, name, database: database || '', branch_path: branchPath || '' }),
+            });
+            const data = resp.ok ? await resp.json() : {};
+            if (data.success) {
+                showNotification('Dropped ' + kind + ' ' + label, 'success');
+                await loadLakebaseObjects();
+            } else {
+                const msg = data.message || 'Drop failed';
+                if (result) {
+                    result.insertAdjacentHTML('afterbegin',
+                        '<div class="alert alert-danger small py-2 mb-2">'
+                        + escapeHtmlSettings(msg) + '</div>');
+                }
+                showNotification('Drop failed: ' + msg, 'danger');
+            }
+        } catch (e) {
+            showNotification('Drop error: ' + (e.message || 'Network error'), 'danger');
+        }
+    }
+
+    function dropLakebaseObject(kind, schema, name, database, branchPath) {
+        const label = kind === 'schema' ? '"' + name + '"' : '"' + schema + '"."' + name + '"';
+        const cascade = kind === 'schema' ? '<br><small class="text-muted">This will also drop all tables and views inside it (CASCADE).</small>' : '';
+        const modalEl = document.getElementById('lkDropConfirmModal');
+        const bodyEl  = document.getElementById('lkDropConfirmModalBody');
+        const confirmBtn = document.getElementById('lkDropConfirmBtn');
+        if (!modalEl || !bodyEl || !confirmBtn) {
+            // Fallback for contexts where the modal wasn't injected yet
+            if (window.confirm('Drop ' + kind + ' ' + label + (kind === 'schema' ? ' CASCADE?' : '?'))) {
+                _execDrop(kind, schema, name, database, branchPath);
+            }
+            return;
+        }
+        bodyEl.innerHTML = 'Drop <strong>' + kind + '</strong> <code>' + escapeHtmlSettings(label) + '</code>?' + cascade;
+        // Remove any previous listener to avoid stacking
+        const newBtn = confirmBtn.cloneNode(true);
+        confirmBtn.parentNode.replaceChild(newBtn, confirmBtn);
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        newBtn.addEventListener('click', function () {
+            modal.hide();
+            _execDrop(kind, schema, name, database, branchPath);
+        });
+        modal.show();
+    }
+
+    // expose to inline onclick handlers inside the dynamically rendered table
+    window._lkDropObject = dropLakebaseObject;
+
+    document.getElementById('btnLoadLakebaseObjects')?.addEventListener('click', loadLakebaseObjects);
+
     _initSchemaToggle();
 
     /** Persist graph engine and JSON config (used by global Save). */

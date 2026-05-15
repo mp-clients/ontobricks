@@ -8,6 +8,7 @@ Thank you for your interest in contributing to OntoBricks! This document provide
 - [Getting Started](#getting-started)
 - [Development Setup](#development-setup)
 - [Commit Guidelines](#commit-guidelines)
+- [Branch Naming](#branch-naming)
 - [Versioning](#versioning)
 - [Release Process](#release-process)
 - [Pull Request Process](#pull-request-process)
@@ -162,6 +163,45 @@ Before committing, ensure:
    ```
 
 2. **Commit message follows convention**
+
+---
+
+## Branch Naming
+
+Branch names must mirror the [Conventional Commits](#commit-guidelines) type/scope vocabulary so that the purpose of a branch is obvious at a glance.
+
+### Pattern
+
+```
+<type>/<scope>-<short-description>
+```
+
+- **`<type>`** — same values as commit types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`, `chore`
+- **`<scope>`** — optional but recommended; same scopes as commits (`ontology`, `mapping`, `graphdb`, …)
+- **`<short-description>`** — lowercase, hyphen-separated words (no spaces, no uppercase, no slashes)
+
+Special prefixes:
+- `release/<version>` — release preparation branches (e.g. `release/0.3.0`)
+- `hotfix/<description>` — urgent production fixes that bypass the normal branch flow
+
+### Examples
+
+| Intent | Branch name |
+|--------|-------------|
+| New SHACL validation feature | `feat/ontology-shacl-validation` |
+| Fix R2RML nested property bug | `fix/mapping-r2rml-nested-props` |
+| Update API docs | `docs/api-digital-twin-endpoints` |
+| Extract SPARQL service | `refactor/backend-sparql-service` |
+| Bump Lakebase client version | `build/graphdb-lakebase-client-bump` |
+| Prepare v0.3.0 release | `release/0.3.0` |
+| Patch critical reasoning crash | `hotfix/reasoning-owl-rl-crash` |
+
+### Rules
+
+1. **No `main` commits** — all changes go through a branch + PR.
+2. **One concern per branch** — don't mix unrelated types in the same branch.
+3. **Delete after merge** — branches should be short-lived; remove them once the PR is merged.
+4. **Keep it short** — `feat/ontology-shacl` is better than `feat/ontology-add-shacl-validation-on-owl-import`.
 
 ---
 

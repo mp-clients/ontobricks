@@ -576,11 +576,15 @@ class TestGraphEngineLakebaseHealth:
 class TestGraphEngineUcCatalogs:
     def test_missing_warehouse_message(self):
         session_mgr, settings = _mock_context()
+        # Pin all warehouse-id sources to empty so the "configure warehouse" message fires.
+        settings.sql_warehouse_id = None
+        domain_mock = MagicMock()
+        domain_mock.databricks = None  # disables the session fallback
         with (
             patch.object(
                 SettingsService,
                 "_resolve_context",
-                return_value=(MagicMock(), "h", "t", REGISTRY_CFG),
+                return_value=(domain_mock, "h", "t", REGISTRY_CFG),
             ),
             patch.object(_svc_module, "global_config_service") as gcs,
         ):

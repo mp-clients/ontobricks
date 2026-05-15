@@ -175,8 +175,9 @@ class LakebaseFlatStore(LakebaseBase):
         self,
         name: str,
         *,
-        wait_s: int = 30,
-        poll_interval_s: float = 2.0,
+        wait_s: int = 0,
+        poll_interval_s: float = 5.0,
+        synced_phy_override: str = "",
     ) -> None:
         """Create the union view once the ``_sync`` table exists (after Lakeflow snapshot).
 
@@ -189,13 +190,33 @@ class LakebaseFlatStore(LakebaseBase):
 
         After the Lakeflow pipeline reaches ONLINE there can be a short lag before
         the Postgres ``_sync`` table becomes visible.  This method polls for the
-        table's existence up to *wait_s* seconds before giving up so that transient
-        propagation delays do not fail the entire DT build.
+        table's existence up to *wait_s* seconds before giving up with a clear
+        error (rather than silently proceeding and hitting a Postgres
+        "relation does not exist" at view-creation time).
+
+        *wait_s* defaults to the ``ONTOBRICKS_SYNC_VIEW_WAIT_S`` env var
+        (default 300s).  ``poll_interval_s`` can be overridden via
+        ``ONTOBRICKS_SYNC_VIEW_POLL_S`` (default 5s).
+
+        *synced_phy_override* lets callers supply the actual Postgres table name
+        when ``SyncedTableManager.ensure()`` used a ghost-state fallback suffix
+        (e.g. ``cust360auto_v4_sync_b`` instead of ``cust360auto_v4_sync``).
         """
+        import os
+        import time as _time
+
         if not self.is_synced:
             return
+
+        if wait_s == 0:
+            wait_s = int(os.environ.get("ONTOBRICKS_SYNC_VIEW_WAIT_S", "") or 300)
+        if poll_interval_s == 5.0:
+            poll_interval_s = float(
+                os.environ.get("ONTOBRICKS_SYNC_VIEW_POLL_S", "") or 5.0
+            )
+
         companion = self.companion_phy(name)
-        synced_bare = self.synced_phy(name)
+        synced_bare = synced_phy_override or self.synced_phy(name)
         view = self._readable_table_id(name)
         sync_pg_schema = (self._sync_uc_schema or self._schema).strip()
         synced = (
@@ -205,8 +226,6 @@ class LakebaseFlatStore(LakebaseBase):
         )
 
         # Poll until the _sync table is visible in Postgres (propagation lag after ONLINE).
-        import time as _time
-
         deadline = _time.time() + max(1, int(wait_s))
         attempt = 0
         while True:
@@ -214,23 +233,31 @@ class LakebaseFlatStore(LakebaseBase):
             with self._cursor() as cur:
                 exists = self._sync_table_exists(cur, sync_pg_schema, synced_bare)
             if exists:
+                if attempt > 1:
+                    logger.info(
+                        "ensure_synced_union_view: _sync table %r visible "
+                        "after %d attempt(s)",
+                        synced_bare,
+                        attempt,
+                    )
                 break
             remaining = deadline - _time.time()
             if remaining <= 0:
-                logger.warning(
-                    "ensure_synced_union_view: _sync table %r not found in schema %r "
-                    "after %ds — proceeding anyway (CREATE VIEW will fail if still missing)",
-                    synced_bare,
-                    sync_pg_schema,
-                    wait_s,
+                raise RuntimeError(
+                    f"_sync table {synced_bare!r} not found in Postgres schema "
+                    f"{sync_pg_schema!r} after {wait_s}s. "
+                    f"The Lakeflow pipeline reported ONLINE but Lakebase has not "
+                    f"yet materialised the Postgres table. "
+                    f"Set ONTOBRICKS_SYNC_VIEW_WAIT_S to a higher value if this "
+                    f"workspace consistently needs more time."
                 )
-                break
             logger.info(
-                "ensure_synced_union_view: _sync table %r not yet visible (attempt %d) "
-                "— retrying in %.1fs",
+                "ensure_synced_union_view: _sync table %r not yet visible "
+                "(attempt %d, %.0fs remaining) — retrying in %.1fs",
                 synced_bare,
                 attempt,
-                poll_interval_s,
+                remaining,
+                min(poll_interval_s, remaining),
             )
             _time.sleep(min(poll_interval_s, remaining))
 
@@ -835,9 +862,11 @@ def resolve_sync_uc_fallback_catalog(
 
     Resolution order:
 
-    1. Environment variable ``ONTBRICKS_SYNC_UC_CATALOG`` — optional deployment-wide
-       pin so every domain falls back to the same UC catalog (e.g. a shared
-       ``ontobricks`` catalog) when the JSON config leaves ``sync_uc_catalog`` empty.
+    1. Environment variable ``ONTOBRICKS_SYNC_UC_CATALOG`` — optional deployment-
+       wide pin so every domain falls back to the same UC catalog (e.g. a shared
+       ``main`` catalog) when the JSON config leaves ``sync_uc_catalog`` empty.
+       The legacy spelling ``ONTBRICKS_SYNC_UC_CATALOG`` (without the ``O``) is
+       still honoured for backwards compatibility but is deprecated.
     2. ``RegistryCfg.from_domain`` — the catalog from **Settings → Registry**
        (the Volume / registry UC triplet). This matches where operators expect
        managed assets to live.
@@ -849,8 +878,23 @@ def resolve_sync_uc_fallback_catalog(
     """
     import os
 
-    pin = os.getenv("ONTBRICKS_SYNC_UC_CATALOG", "").strip()
+    pin = os.getenv("ONTOBRICKS_SYNC_UC_CATALOG", "").strip()
+    if not pin:
+        # Backwards-compat with the original (typoed) env var name. Warn so
+        # operators migrate away from it.
+        legacy = os.getenv("ONTBRICKS_SYNC_UC_CATALOG", "").strip()
+        if legacy:
+            logger.warning(
+                "Using deprecated env var ONTBRICKS_SYNC_UC_CATALOG=%r — "
+                "rename to ONTOBRICKS_SYNC_UC_CATALOG (added 'O').",
+                legacy,
+            )
+            pin = legacy
     if pin:
+        logger.info(
+            "resolve_sync_uc_fallback_catalog: using ONTOBRICKS_SYNC_UC_CATALOG=%r",
+            pin,
+        )
         return pin
 
     try:
@@ -859,6 +903,11 @@ def resolve_sync_uc_fallback_catalog(
         rc = RegistryCfg.from_domain(domain, settings)
         cat = (rc.catalog or "").strip()
         if cat:
+            logger.info(
+                "resolve_sync_uc_fallback_catalog: using registry catalog %r "
+                "(no ONTOBRICKS_SYNC_UC_CATALOG set)",
+                cat,
+            )
             return cat
     except Exception as exc:  # noqa: BLE001
         logger.debug(
@@ -866,6 +915,13 @@ def resolve_sync_uc_fallback_catalog(
             exc,
         )
     dc = delta_cfg or {}
-    return str(dc.get("catalog") or "").strip()
+    fallback = str(dc.get("catalog") or "").strip()
+    if fallback:
+        logger.info(
+            "resolve_sync_uc_fallback_catalog: using domain.delta catalog %r "
+            "(no env var or registry catalog available)",
+            fallback,
+        )
+    return fallback
 
 

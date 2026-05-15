@@ -54,9 +54,13 @@ Deployment uses **Databricks Asset Bundles (DAB)** — a declarative, repeatable
 - Git
 - Access to a Databricks workspace (Databricks Apps must be enabled)
 - Databricks CLI installed (`>= 0.250.0`) and authenticated
-- **Lakebase Autoscaling** project + branch + Postgres database (the
-  registry backend since v0.4.0). Provisioned Lakebase instances are
-  **not** supported — see `LakebaseAuth` for the reasoning.
+- **Lakebase project** — must be created via the **old instances API**
+  (`POST /api/2.0/database/instances`), not the Databricks UI "New project"
+  button. The UI uses `POST /api/2.0/postgres/projects`, which produces an
+  autoscaling-only project that is **incompatible** with the Synced Tables
+  API (`POST /api/2.0/database/synced_tables`) used by the Digital Twin
+  build. Use `scripts/setup-lakebase.sh` to create the project correctly
+  (see §2 prerequisites below).
 - `psql` (libpq client) on `PATH` for `scripts/bootstrap-lakebase-perms.sh`
   (`brew install libpq && brew link --force libpq` on macOS).
 
@@ -151,10 +155,45 @@ Deployment uses **Databricks Asset Bundles** to deploy both the main app and the
 | SQL Warehouse | A running SQL Warehouse in the workspace |
 | Apps feature | Databricks Apps must be enabled on the workspace |
 | Unity Catalog | A catalog, schema, and volume for the project registry |
-| **Lakebase Autoscaling** | A Lakebase Autoscaling **project + branch + Postgres database** (the registry backend since v0.4.0). Resolve the `db-…` resource id via `databricks postgres list-databases "projects/<project>/branches/<branch>" -o json` and put it in `scripts/deploy.config.sh > DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT`. Provisioned tier is **not** supported. |
+| **Lakebase project** | Must be provisioned via `scripts/setup-lakebase.sh` — **do not** use the Databricks UI "New project" button (calls wrong API, incompatible with Synced Tables). The script uses `POST /api/2.0/database/instances` and prints the `db-…` resource id to put in `scripts/deploy.config.sh > DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT`. See §2a below. |
 | `psql` on PATH | Required by `scripts/bootstrap-lakebase-perms.sh` (`brew install libpq && brew link --force libpq` on macOS). |
 | UC grants for the app SP | The app runs as a service principal. See [§3 Unity Catalog Permissions for the Service Principal](#3-unity-catalog-permissions-for-the-service-principal) for the exact grants required on the registry catalog/schema, the registry volume, and your source tables. |
 | Lakebase grants for the app SP | `CAN_USE` on the Lakebase instance + `USAGE/DML` on the registry / graph / sync schemas. Bootstrap with `scripts/bootstrap-lakebase-perms.sh` (`make bootstrap-lakebase`) — `scripts/deploy.sh` runs it automatically on the `dev-lakebase` target. |
+
+### Step 0 — Create the Lakebase project (first-time only)
+
+> **Critical:** The Databricks UI "New project" button calls
+> `POST /api/2.0/postgres/projects` which creates an autoscaling-only project.
+> That API is **incompatible** with the Synced Tables API
+> (`POST /api/2.0/database/synced_tables`) used by the Digital Twin build.
+> You must use `scripts/setup-lakebase.sh` instead.
+
+```bash
+# Create the project (once per workspace):
+./scripts/setup-lakebase.sh --name ontobricks-demo --capacity CU_2
+
+# The script prints the db-… resource id at the end — copy it into
+# deploy.config.sh > DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT.
+```
+
+The script:
+1. Creates the instance via `POST /api/2.0/database/instances` (synced-tables-compatible).
+2. Waits for `AVAILABLE`.
+3. Creates the Postgres database (`ontobricks_demo` by default).
+4. Prints the `db-…` segment needed for `deploy.config.sh`.
+
+**Options:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--name` | `ontobricks-demo` | Project name |
+| `--capacity` | `CU_2` | Compute: `CU_1`, `CU_2`, `CU_4` |
+| `--branch` | `production` | Initial branch |
+| `--database` | `ontobricks_demo` | Postgres database name |
+| `--profile` | `DEFAULT` | Databricks CLI profile |
+| `--dry-run` | — | Print plan without executing |
+
+---
 
 ### Step 1 — Authenticate
 
@@ -727,6 +766,15 @@ databricks current-user me
 # Or with a profile: databricks current-user me --profile new-ws
 ```
 
+### 5.1b — Create the Lakebase project (new workspace, first time)
+
+```bash
+# Create the project via the correct API (synced-tables-compatible):
+./scripts/setup-lakebase.sh --name ontobricks-demo --capacity CU_2
+
+# Copy the printed db-… segment into deploy.config.sh (DEFAULT_LAKEBASE_DATABASE_RESOURCE_SEGMENT)
+```
+
 ### 5.2 — Prepare Unity Catalog resources
 
 The new workspace needs a catalog/schema where OntoBricks can store projects and triple stores:
@@ -825,7 +873,7 @@ databricks bundle run mcp_ontobricks_app -t dev-lakebase
 [ ] 1.  databricks auth login --host https://<new-workspace>
 [ ] 2.  Verify: databricks current-user me
 [ ] 3.  Create Unity Catalog resources (catalog, schema, volume)
-[ ] 4.  Create a Lakebase Autoscaling project + branch + Postgres database
+[ ] 4.  Create Lakebase project via `scripts/setup-lakebase.sh` (run BEFORE deploy — copy the `db-…` id into `deploy.config.sh`)
         Resolve the db-… resource id with:
           databricks postgres list-databases \
             "projects/<project>/branches/<branch>" -o json
@@ -1152,7 +1200,7 @@ Use this checklist when deploying OntoBricks from scratch on any workspace:
         [ ] A catalog you can use (e.g., main or your personal catalog)
         [ ] A schema within that catalog (e.g., ontobricks)
         [ ] A Volume for the project registry (e.g., OntoBricksRegistry)
-[ ] 4.  Lakebase Autoscaling project + branch + Postgres database created
+[ ] 4.  Lakebase project created via `scripts/setup-lakebase.sh` (`db-…` id copied into `deploy.config.sh`)
         (required since v0.4.0 — Provisioned tier is not supported).
         Resolve the db-… resource id:
           databricks postgres list-databases \

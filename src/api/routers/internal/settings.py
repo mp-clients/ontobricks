@@ -732,6 +732,43 @@ async def get_graph_engine_lakebase_pg_schemas(
     return config_service.graph_engine_lakebase_pg_schemas_result(database, session_mgr, settings)
 
 
+@router.get("/graph-engine/lakebase-objects")
+async def get_graph_engine_lakebase_objects(
+    database: str = "",
+    branch_path: str = "",
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """List all user-owned schemas, tables and views in a Lakebase database (admin only).
+
+    ``branch_path`` (full resource path, e.g. ``projects/…/branches/…``) is
+    the form's current branch selection; when supplied the connection targets
+    that branch directly rather than the saved/bound config.
+    """
+    return config_service.graph_engine_lakebase_objects_result(
+        database, branch_path, session_mgr, settings
+    )
+
+
+@router.post("/graph-engine/lakebase-drop-object")
+async def post_graph_engine_lakebase_drop_object(
+    request: Request,
+    session_mgr: SessionManager = Depends(get_session_manager),
+    settings: Settings = Depends(get_settings),
+):
+    """Drop a Postgres schema, table or view in the connected Lakebase database (admin only)."""
+    data = await request.json()
+    return config_service.graph_engine_lakebase_drop_object_result(
+        kind=data.get("kind", ""),
+        schema=data.get("schema", ""),
+        name=data.get("name", ""),
+        database=data.get("database", ""),
+        branch_path=data.get("branch_path", ""),
+        session_mgr=session_mgr,
+        settings=settings,
+    )
+
+
 @router.post("/graph-engine-config")
 async def set_graph_engine_config(
     request: Request,
