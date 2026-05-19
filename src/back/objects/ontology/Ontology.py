@@ -410,12 +410,14 @@ class Ontology:
         }
 
     def add_class(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Build a class from *data*, append if unique URI, clear cache and save."""
+        """Build a class from *data*, append if unique URI and name, clear cache and save."""
         s = self._domain
         classes = list(s.get_classes())
         new_class = Ontology.build_class_from_data(data)
         if any(c.get("uri") == new_class["uri"] for c in classes):
             raise ValidationError("Class with this URI already exists")
+        if any(c.get("name") == new_class["name"] for c in classes):
+            raise ValidationError("Class with this name already exists")
         classes.append(new_class)
         s.ontology["classes"] = classes
         s.clear_generated_content()
@@ -427,8 +429,12 @@ class Ontology:
         s = self._domain
         classes = list(s.get_classes())
         class_uri = data.get("uri")
+        new_name = data.get("name")
         for i, cls in enumerate(classes):
             if cls.get("uri") == class_uri:
+                if new_name and new_name != cls.get("name"):
+                    if any(c.get("name") == new_name for j, c in enumerate(classes) if j != i):
+                        raise ValidationError("Class with this name already exists")
                 classes[i] = Ontology.build_class_from_data(data, cls)
                 s.ontology["classes"] = classes
                 s.clear_generated_content()
@@ -437,12 +443,14 @@ class Ontology:
         raise NotFoundError("Class not found")
 
     def add_property(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Build a property from *data*, append if unique URI, clear cache and save."""
+        """Build a property from *data*, append if unique URI and name, clear cache and save."""
         s = self._domain
         properties = list(s.get_properties())
         new_property = Ontology.build_property_from_data(data)
         if any(p.get("uri") == new_property["uri"] for p in properties):
             raise ValidationError("Property with this URI already exists")
+        if any(p.get("name") == new_property["name"] for p in properties):
+            raise ValidationError("Property with this name already exists")
         properties.append(new_property)
         s.ontology["properties"] = properties
         s.clear_generated_content()
@@ -454,8 +462,12 @@ class Ontology:
         s = self._domain
         properties = list(s.get_properties())
         property_uri = data.get("uri")
+        new_name = data.get("name")
         for i, prop in enumerate(properties):
             if prop.get("uri") == property_uri:
+                if new_name and new_name != prop.get("name"):
+                    if any(p.get("name") == new_name for j, p in enumerate(properties) if j != i):
+                        raise ValidationError("Property with this name already exists")
                 properties[i] = Ontology.build_property_from_data(data, prop)
                 s.ontology["properties"] = properties
                 s.clear_generated_content()

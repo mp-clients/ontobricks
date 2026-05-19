@@ -200,20 +200,38 @@ async function initMappingDesigner() {
         // Build links from properties (relationships) and inheritance
         const links = [];
         const validNodeIds = new Set(nodes.map(n => n.id));
-        
+        // Resolve a class reference (name, local-name, or full URI) to the canonical node id.
+        // Tries: exact → case-insensitive → URI local-part extraction (case-insensitive).
+        const nodeIdByLower = new Map(nodes.map(n => [n.id.toLowerCase(), n.id]));
+        const resolveNodeId = id => {
+            if (!id) return null;
+            if (validNodeIds.has(id)) return id;
+            const lower = id.toLowerCase();
+            if (nodeIdByLower.has(lower)) return nodeIdByLower.get(lower);
+            // URI: extract local name after last '#' or '/'
+            const localPart = id.includes('#') ? id.split('#').pop() : id.includes('/') ? id.split('/').pop() : null;
+            if (localPart) {
+                if (validNodeIds.has(localPart)) return localPart;
+                if (nodeIdByLower.has(localPart.toLowerCase())) return nodeIdByLower.get(localPart.toLowerCase());
+            }
+            return null;
+        };
+
         // Add relationship links (only if both domain and range exist as nodes)
         properties.forEach(prop => {
             if (prop.domain && prop.range) {
-                if (!validNodeIds.has(prop.domain) || !validNodeIds.has(prop.range)) {
+                const srcId = resolveNodeId(prop.domain);
+                const tgtId = resolveNodeId(prop.range);
+                if (!srcId || !tgtId) {
                     console.log(`[MappingMap] Skipping property "${prop.name}": domain="${prop.domain}" or range="${prop.range}" not found in nodes`);
                     return;
                 }
                 const isExcluded = !!prop.excluded
-                    || excludedEntityNames.has(prop.domain)
-                    || excludedEntityNames.has(prop.range);
+                    || excludedEntityNames.has(srcId)
+                    || excludedEntityNames.has(tgtId);
                 links.push({
-                    source: prop.domain,
-                    target: prop.range,
+                    source: srcId,
+                    target: tgtId,
                     name: prop.name || prop.localName,
                     uri: prop.uri,
                     type: 'relationship',
@@ -228,13 +246,14 @@ async function initMappingDesigner() {
         classes.forEach(cls => {
             if (cls.parent) {
                 const childId = cls.name || cls.localName;
-                if (!validNodeIds.has(cls.parent)) {
+                const parentId = resolveNodeId(cls.parent);
+                if (!parentId) {
                     console.log(`[MappingMap] Skipping inheritance for "${childId}": parent "${cls.parent}" not found in nodes`);
                     return;
                 }
-                const isExcluded = !!cls.excluded || excludedEntityNames.has(cls.parent);
+                const isExcluded = !!cls.excluded || excludedEntityNames.has(parentId);
                 links.push({
-                    source: cls.parent,
+                    source: parentId,
                     target: childId,
                     name: 'inherits',
                     type: 'inheritance',

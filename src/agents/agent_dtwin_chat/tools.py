@@ -95,6 +95,41 @@ def _error(msg: str) -> str:
     return json.dumps({"error": msg})
 
 
+def _get_ontology_labels(ctx: ToolContext) -> dict:
+    """Return (and lazily populate) the ontology URI→label map on the context."""
+    if ctx.dtwin_ontology_labels:
+        return ctx.dtwin_ontology_labels
+    try:
+        with _client(ctx) as c:
+            resp = c.get("/ontology/load")
+            if resp.status_code != 200:
+                return {}
+            data = resp.json()
+        config = data.get("config", {}) if isinstance(data, dict) else {}
+        labels: dict = {}
+        for cls in config.get("classes", []):
+            lbl = cls.get("label") or cls.get("name") or ""
+            uri = cls.get("uri", "")
+            name = cls.get("name", "")
+            if uri and lbl:
+                labels[uri] = lbl
+            if name and lbl:
+                labels[name.lower()] = lbl
+        for prop in config.get("properties", []):
+            lbl = prop.get("label") or prop.get("name") or ""
+            uri = prop.get("uri", "")
+            name = prop.get("name", "")
+            if uri and lbl:
+                labels[uri] = lbl
+            if name and lbl:
+                labels[name.lower()] = lbl
+        ctx.dtwin_ontology_labels = labels
+        logger.info("Loaded %d ontology labels for graph chat", len(labels))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load ontology labels: %s", exc)
+    return ctx.dtwin_ontology_labels
+
+
 # =====================================================
 # Tool handlers
 # =====================================================
@@ -129,6 +164,8 @@ def tool_list_entity_types(ctx: ToolContext, **_kwargs) -> str:
     lines.append(f"Relationships:       {data.get('relationship_count', 0):,}")
     lines.append("")
 
+    onto_labels = _get_ontology_labels(ctx)
+
     entity_types = data.get("entity_types", [])
     if entity_types:
         lines.append("Entity Types")
@@ -136,7 +173,9 @@ def tool_list_entity_types(ctx: ToolContext, **_kwargs) -> str:
         for et in entity_types:
             uri = et.get("uri", "")
             count = et.get("count", 0)
-            lines.append(f"  - {local_name(uri)}  ({count:,} instances)")
+            key = local_name(uri).lower()
+            name = onto_labels.get(uri) or onto_labels.get(key) or local_name(uri)
+            lines.append(f"  - {name}  ({count:,} instances)")
             lines.append(f"    URI: {uri}")
         lines.append("")
 
@@ -147,7 +186,9 @@ def tool_list_entity_types(ctx: ToolContext, **_kwargs) -> str:
         for tp in top_predicates:
             uri = tp.get("uri", "")
             count = tp.get("count", 0)
-            lines.append(f"  - {pretty_predicate(uri)}  ({count:,} usages)")
+            key = local_name(uri).lower()
+            name = onto_labels.get(uri) or onto_labels.get(key) or pretty_predicate(uri)
+            lines.append(f"  - {name}  ({count:,} usages)")
 
     return "\n".join(lines)
 
@@ -187,7 +228,7 @@ def tool_describe_entity(
     except Exception as exc:
         return _error(f"triples/find error: {exc}")
 
-    return format_find_response(data)
+    return format_find_response(data, ontology_labels=_get_ontology_labels(ctx))
 
 
 def tool_get_status(ctx: ToolContext, **_kwargs) -> str:

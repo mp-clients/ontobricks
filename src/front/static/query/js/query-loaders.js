@@ -134,9 +134,11 @@ async function loadOntologyClasses() {
         const data = await response.json();
         
         ontologyClasses = {};
+        if (typeof ontologyProperties !== 'undefined') ontologyProperties = {};
         
-        if (data && data.success && data.config && data.config.classes) {
-            for (const cls of data.config.classes) {
+        if (data && data.success && data.config) {
+            // Load classes
+            for (const cls of (data.config.classes || [])) {
                 const classInfo = {
                     name: cls.name || '',
                     label: cls.label || cls.name || '',
@@ -147,22 +149,29 @@ async function loadOntologyClasses() {
                     description: cls.description || cls.comment || '',
                     dataProperties: cls.dataProperties || []
                 };
-                
-                // Store by name (lowercase for lookup)
-                if (cls.name) {
-                    ontologyClasses[cls.name.toLowerCase()] = classInfo;
-                }
-                // Also store by URI if available
+                if (cls.name) ontologyClasses[cls.name.toLowerCase()] = classInfo;
                 if (cls.uri) {
                     ontologyClasses[cls.uri.toLowerCase()] = classInfo;
-                    // Also by local part of URI
                     const localPart = cls.uri.split('#').pop().split('/').pop();
-                    if (localPart) {
-                        ontologyClasses[localPart.toLowerCase()] = classInfo;
-                    }
+                    if (localPart) ontologyClasses[localPart.toLowerCase()] = classInfo;
                 }
             }
-            console.log('Loaded ontology classes:', Object.keys(ontologyClasses).length, 'keys for', data.config.classes.length, 'classes');
+            console.log('Loaded ontology classes:', Object.keys(ontologyClasses).length, 'keys for', (data.config.classes || []).length, 'classes');
+
+            // Load properties (for label lookup in the knowledge graph)
+            for (const prop of (data.config.properties || [])) {
+                const propInfo = {
+                    name: prop.name || '',
+                    label: prop.label || prop.name || ''
+                };
+                if (prop.name) ontologyProperties[prop.name.toLowerCase()] = propInfo;
+                if (prop.uri) {
+                    ontologyProperties[prop.uri.toLowerCase()] = propInfo;
+                    const localPart = prop.uri.split('#').pop().split('/').pop();
+                    if (localPart) ontologyProperties[localPart.toLowerCase()] = propInfo;
+                }
+            }
+            console.log('Loaded ontology properties:', Object.keys(ontologyProperties).length, 'keys for', (data.config.properties || []).length, 'properties', '| sample:', Object.keys(ontologyProperties).slice(0, 5));
         }
     } catch (error) {
         console.log('No ontology classes loaded:', error.message);
@@ -252,22 +261,23 @@ async function loadEntityMappings() {
  */
 function findOntologyClass(classRef) {
     if (!classRef) return null;
-    
     const refLower = classRef.toLowerCase();
-    
-    // Direct match
     if (ontologyClasses[refLower]) return ontologyClasses[refLower];
-    
-    // Try local part of URI
     const localPart = refLower.split('#').pop().split('/').pop();
     if (ontologyClasses[localPart]) return ontologyClasses[localPart];
-    
-    // Partial match
     for (const [key, info] of Object.entries(ontologyClasses)) {
-        if (key.includes(localPart) || localPart.includes(key)) {
-            return info;
-        }
+        if (key.includes(localPart) || localPart.includes(key)) return info;
     }
-    
+    return null;
+}
+
+function findOntologyProperty(propRef) {
+    if (!propRef) return null;
+    try {
+        const refLower = propRef.toLowerCase();
+        if (ontologyProperties[refLower]) return ontologyProperties[refLower];
+        const localPart = refLower.split('#').pop().split('/').pop();
+        if (localPart && localPart !== refLower && ontologyProperties[localPart]) return ontologyProperties[localPart];
+    } catch (_) {}
     return null;
 }

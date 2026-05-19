@@ -56,25 +56,27 @@ def patch_client(monkeypatch):
 class TestListEntityTypes:
     def test_happy_path(self, patch_client):
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/dtwin/sync/stats"
-            return httpx.Response(
-                200,
-                json={
-                    "success": True,
-                    "total_triples": 12345,
-                    "distinct_subjects": 100,
-                    "distinct_predicates": 10,
-                    "label_count": 100,
-                    "type_assertion_count": 100,
-                    "relationship_count": 80,
-                    "entity_types": [
-                        {"uri": "http://example.org/Customer", "count": 42},
-                    ],
-                    "top_predicates": [
-                        {"uri": "http://example.org/hasOrder", "count": 7},
-                    ],
-                },
-            )
+            if request.url.path == "/dtwin/sync/stats":
+                return httpx.Response(
+                    200,
+                    json={
+                        "success": True,
+                        "total_triples": 12345,
+                        "distinct_subjects": 100,
+                        "distinct_predicates": 10,
+                        "label_count": 100,
+                        "type_assertion_count": 100,
+                        "relationship_count": 80,
+                        "entity_types": [
+                            {"uri": "http://example.org/Customer", "count": 42},
+                        ],
+                        "top_predicates": [
+                            {"uri": "http://example.org/hasOrder", "count": 7},
+                        ],
+                    },
+                )
+            # ontology/load or other calls: return empty ok
+            return httpx.Response(200, json={"success": True, "config": {"classes": [], "properties": []}})
 
         patch_client(handler)
         out = chat_tools.tool_list_entity_types(_ctx())
@@ -114,7 +116,8 @@ class TestDescribeEntity:
         captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured["params"] = dict(request.url.params)
+            if "/triples/find" in request.url.path:
+                captured["params"] = dict(request.url.params)
             return httpx.Response(200, json={"success": True, "entities": []})
 
         patch_client(handler)
@@ -125,7 +128,8 @@ class TestDescribeEntity:
         captured = {}
 
         def handler(request: httpx.Request) -> httpx.Response:
-            captured["params"] = dict(request.url.params)
+            if "/triples/find" in request.url.path:
+                captured["params"] = dict(request.url.params)
             return httpx.Response(200, json={"success": True, "entities": []})
 
         patch_client(handler)

@@ -608,6 +608,10 @@ async function renderEntityForm(panel, cls, viewOnly = false) {
                     <input type="text" class="form-control form-control-sm" id="sharedEntityName" value="${cls?.name || ''}" ${disabled} required>
                 </div>
                 <div class="mb-3">
+                    <label for="sharedEntityLabel" class="form-label">Label</label>
+                    <input type="text" class="form-control form-control-sm" id="sharedEntityLabel" value="${cls?.label || cls?.name || ''}" ${disabled} placeholder="Defaults to name if empty">
+                </div>
+                <div class="mb-3">
                     <label class="form-label">Icon</label>
                     <div class="input-group input-group-sm">
                         <span class="input-group-text" id="sharedEntityEmojiPreview">${emoji}</span>
@@ -1557,6 +1561,8 @@ function applyManualDashboardUrl() {
 
 async function saveSharedEntity() {
     const name = panelGetById('sharedEntityName')?.value.trim();
+    const labelRaw = panelGetById('sharedEntityLabel')?.value.trim();
+    const label = labelRaw || name;
     const icon = panelGetById('sharedEntityIcon')?.value.trim();
     const parent = panelGetById('sharedEntityParent')?.value;
     const description = panelGetById('sharedEntityDescription')?.value.trim();
@@ -1568,16 +1574,18 @@ async function saveSharedEntity() {
     const equivalentTo = equivalentToSelect ? Array.from(equivalentToSelect.selectedOptions).map(opt => opt.value) : [];
     
     if (!name) { showNotification('Please enter an entity name', 'warning'); return; }
+
+    const duplicateEntity = (OntologyState.config.classes || []).some((c, i) => c.name === name && i !== sharedPanelEditIndex);
+    if (duplicateEntity) { showNotification(`An entity named "${name}" already exists`, 'warning'); return; }
     
     const validAttributes = sharedPanelOwnAttributes.filter(a => a.name?.trim()).map(a => ({ name: a.name.trim(), localName: a.name.trim() }));
     
-    // Label is the same as name - NO constraints field in class data
     console.log('[SharedPanel] Saving - sharedPanelDashboardParams:', JSON.stringify(sharedPanelDashboardParams));
     
     const classData = { 
         name, 
         localName: name, 
-        label: name, 
+        label, 
         emoji: icon, 
         parent: parent || undefined, 
         description, 
@@ -1591,7 +1599,10 @@ async function saveSharedEntity() {
     console.log('[SharedPanel] Saving - classData.dashboardParams:', JSON.stringify(classData.dashboardParams));
     
     if (sharedPanelEditIndex >= 0) {
-        const oldName = OntologyState.config.classes[sharedPanelEditIndex].name;
+        const existing = OntologyState.config.classes[sharedPanelEditIndex] || {};
+        const oldName = existing.name;
+        // Preserve server-assigned URI so the backend prune doesn't orphan mappings.
+        if (existing.uri) classData.uri = existing.uri;
         OntologyState.config.classes[sharedPanelEditIndex] = classData;
         if (oldName !== name) {
             OntologyState.config.classes.forEach(c => { if (c.parent === oldName) c.parent = name; });
@@ -1829,6 +1840,10 @@ async function renderRelationshipForm(panel, prop, viewOnly = false) {
                     <input type="text" class="form-control form-control-sm" id="sharedRelName" value="${prop?.name || ''}" ${disabled} required>
                 </div>
                 <div class="mb-3">
+                    <label for="sharedRelLabel" class="form-label">Label</label>
+                    <input type="text" class="form-control form-control-sm" id="sharedRelLabel" value="${prop?.label || prop?.name || ''}" ${disabled} placeholder="Defaults to name if empty">
+                </div>
+                <div class="mb-3">
                     <label for="sharedRelDomain" class="form-label">Source (Domain) <span class="text-danger">*</span></label>
                     <select class="form-select form-select-sm" id="sharedRelDomain" ${disabled} required>
                         <option value="">-- Select --</option>${classOptions}
@@ -1948,6 +1963,8 @@ async function renderRelationshipForm(panel, prop, viewOnly = false) {
 
 async function saveSharedRelationship() {
     const name = panelGetById('sharedRelName')?.value.trim();
+    const labelRaw = panelGetById('sharedRelLabel')?.value.trim();
+    const label = labelRaw || name;
     const domain = panelGetById('sharedRelDomain')?.value;
     const range = panelGetById('sharedRelRange')?.value;
     const direction = panelGetById('sharedRelDirection')?.value;
@@ -1962,6 +1979,10 @@ async function saveSharedRelationship() {
     const isTransitive = panelGetById('sharedRelTransitive')?.checked || false;
     
     if (!name) { showNotification('Please enter a relationship name', 'warning'); return; }
+
+    const duplicateRel = (OntologyState.config.properties || []).some((p, i) => p.name === name && i !== sharedPanelEditIndex);
+    if (duplicateRel) { showNotification(`A relationship named "${name}" already exists`, 'warning'); return; }
+
     if (!domain) { showNotification('Please select a source entity', 'warning'); return; }
     if (!range) { showNotification('Please select a target entity', 'warning'); return; }
     
@@ -1978,11 +1999,10 @@ async function saveSharedRelationship() {
     if (isSymmetric) constraints.symmetric = true;
     if (isTransitive) constraints.transitive = true;
     
-    // Label is the same as name - NO constraints field in property data
     const propertyData = { 
         name, 
         localName: name, 
-        label: name, 
+        label, 
         comment, 
         description: comment, 
         type: 'ObjectProperty', 
@@ -1994,6 +2014,9 @@ async function saveSharedRelationship() {
     const isRename = sharedPanelEditIndex >= 0 && sharedPanelOriginalName && sharedPanelOriginalName !== name;
     
     if (sharedPanelEditIndex >= 0) {
+        const existingProp = OntologyState.config.properties[sharedPanelEditIndex] || {};
+        // Preserve server-assigned URI so the backend prune doesn't orphan mappings.
+        if (existingProp.uri) propertyData.uri = existingProp.uri;
         OntologyState.config.properties[sharedPanelEditIndex] = propertyData;
         showNotification('Relationship updated', 'success', 2000);
     } else {

@@ -40,7 +40,7 @@ import logging
 import os
 import re
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import httpx
 from fastmcp import FastMCP
@@ -107,8 +107,13 @@ def _is_label_predicate(pred: str) -> bool:
 # ── Triple formatting ────────────────────────────────────────────────────
 
 
-def _format_entity_block(entity_uri: str, triples: list[dict]) -> str:
+def _format_entity_block(
+    entity_uri: str,
+    triples: list[dict],
+    label_or_local: "Callable[[str], str] | None" = None,
+) -> str:
     """Build a human-readable text block for one entity."""
+    _resolve = label_or_local or _local_name
     lines: list[str] = []
     entity_label = _local_name(entity_uri)
     types: list[str] = []
@@ -121,13 +126,13 @@ def _format_entity_block(entity_uri: str, triples: list[dict]) -> str:
         obj = t["object"]
 
         if pred == RDF_TYPE:
-            types.append(_local_name(obj))
+            types.append(_resolve(obj))
         elif _is_label_predicate(pred):
             labels.append(obj)
         elif _is_uri(obj):
-            relationships.append((_pretty_predicate(pred), _local_name(obj)))
+            relationships.append((_resolve(pred), _local_name(obj)))
         else:
-            attributes.append((_pretty_predicate(pred), obj))
+            attributes.append((_resolve(pred), obj))
 
     display_name = labels[0] if labels else entity_label
     type_str = ", ".join(types) if types else "Unknown type"
@@ -179,7 +184,7 @@ def _merge_uri_aliases(by_subject: dict[str, list[dict]]) -> dict[str, list[dict
     return merged
 
 
-def _format_find_response(data: dict) -> str:
+def _format_find_response(data: dict, label_or_local: "Callable[[str], str] | None" = None) -> str:
     """Convert a /triples/find JSON response into a full-text description."""
     if not data.get("success"):
         return data.get("message", "Search failed.")
@@ -223,13 +228,13 @@ def _format_find_response(data: dict) -> str:
 
     parts.append("── Matching Entities ──")
     for uri in seed_uris:
-        parts.append(_format_entity_block(uri, by_subject.get(uri, [])))
+        parts.append(_format_entity_block(uri, by_subject.get(uri, []), label_or_local))
         parts.append("")
 
     if related_uris:
         parts.append("── Related Entities (neighbors) ──")
         for uri in related_uris:
-            parts.append(_format_entity_block(uri, by_subject.get(uri, [])))
+            parts.append(_format_entity_block(uri, by_subject.get(uri, []), label_or_local))
             parts.append("")
 
     if total > len(triples):
@@ -444,6 +449,21 @@ async def _get(
     return resp.json()
 
 
+async def _post(
+    client: httpx.AsyncClient, path: str, json: dict | None = None
+) -> dict:
+    """POST *path* on *client* with optional JSON body and return the JSON response."""
+    logger.info("POST %s%s", client.base_url, path)
+    resp = await client.post(path, json=json or {}, timeout=120)
+    if resp.status_code >= 400:
+        body_excerpt = resp.text[:500].replace("\n", " ") if resp.text else ""
+        logger.warning("POST %s%s → %s body=%r", client.base_url, path, resp.status_code, body_excerpt)
+    else:
+        logger.info("POST %s%s → %s", client.base_url, path, resp.status_code)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ── Factory ───────────────────────────────────────────────────────────────
 
 
@@ -471,6 +491,7 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
     )
 
     _selected_domain: dict = {"name": None}
+    _ontology_labels: dict[str, str] = {}   # uri/name (lower) → display label
     _registry: dict = {
         "catalog": "",
         "schema": "",
@@ -558,6 +579,33 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
         if _selected_domain["name"]:
             params["domain_name"] = _selected_domain["name"]
         return params
+
+    def _label_or_local(uri: str) -> str:
+        """Return the ontology label for a URI, falling back to its local name."""
+        key = _local_name(uri).lower()
+        return _ontology_labels.get(uri, _ontology_labels.get(key, _local_name(uri)))
+
+    async def _load_ontology_labels(client: httpx.AsyncClient) -> None:
+        """Fetch ontology config and build a URI/name → label lookup map."""
+        _ontology_labels.clear()
+        try:
+            params = _domain_params()
+            resp = await client.post("/api/v1/domain/ontology", json=params, timeout=30)
+            resp.raise_for_status()
+            payload = resp.json()
+            # SuccessResponse wraps the ontology under "data"
+            ontology = payload.get("data", payload) if isinstance(payload, dict) else {}
+            for item in list(ontology.get("classes", [])) + list(ontology.get("properties", [])):
+                lbl = item.get("label") or item.get("name") or ""
+                uri = item.get("uri", "")
+                name = item.get("name", "")
+                if uri and lbl:
+                    _ontology_labels[uri] = lbl
+                if name and lbl:
+                    _ontology_labels[name.lower()] = lbl
+            logger.info("Loaded %d ontology labels", len(_ontology_labels))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not load ontology labels: %s", exc)
 
     mcp = FastMCP(
         "OntoBricks",
@@ -743,11 +791,10 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
 
         async with _client() as client:
             data = await _get(client, API_V1_DT_STATUS, params=params)
-
-        if not data.get("success") and data.get("message"):
-            return f"Error selecting domain: {data['message']}"
-
-        _selected_domain["name"] = domain_name
+            if not data.get("success") and data.get("message"):
+                return f"Error selecting domain: {data['message']}"
+            _selected_domain["name"] = domain_name
+            await _load_ontology_labels(client)
 
         has_data = data.get("has_data", False)
         count = data.get("count", 0)
@@ -804,7 +851,7 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
             for et in entity_types:
                 uri = et.get("uri", "")
                 count = et.get("count", 0)
-                name = _local_name(uri)
+                name = _label_or_local(uri)
                 lines.append(f"  • {name}  ({count:,} instances)")
                 lines.append(f"    URI: {uri}")
             lines.append("")
@@ -816,7 +863,7 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
             for tp in top_predicates:
                 uri = tp.get("uri", "")
                 count = tp.get("count", 0)
-                name = _pretty_predicate(uri)
+                name = _label_or_local(uri) or _pretty_predicate(uri)
                 lines.append(f"  • {name}  ({count:,} usages)")
 
         return "\n".join(lines)
@@ -876,7 +923,7 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
         async with _client() as client:
             data = await _get(client, API_V1_DT_TRIPLES_FIND, params=params)
 
-        return _format_find_response(data)
+        return _format_find_response(data, _label_or_local)
 
     @mcp.tool()
     async def get_status() -> str:

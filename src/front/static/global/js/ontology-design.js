@@ -715,6 +715,7 @@ async function loadFromOntologyFresh() {
         return {
             id: id,
             name: name,
+            label: cls.label || name,
             type: cls.label || name,
             icon: cls.emoji || OntologyState.defaultClassEmoji || '📦',
             description: cls.description || '',
@@ -737,6 +738,7 @@ async function loadFromOntologyFresh() {
                 relationships.push({
                     id: `rel_${Date.now()}_${idx}`,
                     name: prop.name,
+                    label: prop.label || prop.name,
                     sourceEntityId: sourceId,
                     targetEntityId: targetId,
                     sourceAnchor: 'right',
@@ -1160,6 +1162,7 @@ async function loadOntologyIntoDesigner(showAlert = true) {
                 return {
                     id: savedEntity?.id || undefined,
                     name: cls.name || cls.localName,
+                    label: cls.label || cls.name || cls.localName,
                     icon: cls.emoji || cls.icon || '📦',
                     description: cls.description || '',
                     x: posX,
@@ -1195,6 +1198,7 @@ async function loadOntologyIntoDesigner(showAlert = true) {
                     mergedLayout.relationships.push({
                         id: undefined,  // always generate fresh IDs to avoid collisions
                         name: prop.name || prop.localName || 'relates_to',
+                        label: prop.label || prop.name || prop.localName || 'relates_to',
                         sourceEntityId: sourceId,
                         targetEntityId: targetId,
                         direction: prop.direction || 'forward',

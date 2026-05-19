@@ -100,7 +100,7 @@ const OntologyViewer = (() => {
 
         properties.forEach(prop => {
             if (prop.domain && prop.range && validIds.has(prop.domain) && validIds.has(prop.range)) {
-                links.push({ source: prop.domain, target: prop.range, name: prop.name, type: 'relationship', direction: prop.direction || 'forward' });
+                links.push({ source: prop.domain, target: prop.range, name: prop.name, label: prop.label || prop.name, type: 'relationship', direction: prop.direction || 'forward' });
             }
         });
 
@@ -183,7 +183,7 @@ const OntologyViewer = (() => {
 
         const linkLabels = g.append('g').selectAll('text')
             .data(links.filter(l => l.type === 'relationship'))
-            .enter().append('text').attr('class', 'map-link-label').text(d => d.name);
+            .enter().append('text').attr('class', 'map-link-label').text(d => d.label || d.name);
 
         const nodeEls = g.append('g').selectAll('g').data(nodes).enter().append('g')
             .attr('class', 'map-node').style('cursor', 'default');

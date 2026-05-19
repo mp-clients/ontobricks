@@ -48,3 +48,4 @@ class ToolContext:
     dtwin_session_headers: dict = field(default_factory=dict)
     dtwin_registry_params: dict = field(default_factory=dict)
     dtwin_domain_name: str = ""
+    dtwin_ontology_labels: dict = field(default_factory=dict)  # uri/name → display label

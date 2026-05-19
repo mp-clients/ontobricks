@@ -3,12 +3,20 @@
  * Sigma.js Knowledge Graph view layout
  */
 
+/* Strip padding from the sidebar-content wrapper so the graph fills it edge-to-edge */
+.sidebar-content:has(#sigmagraph-section.active) {
+    padding: 0;
+    overflow: hidden;
+}
+
 #sigmagraph-section.active {
-    height: calc(100vh - 80px);
-    max-height: calc(100vh - 80px);
+    height: 100%;
+    max-height: 100%;
     overflow: hidden;
     display: flex;
     flex-direction: column;
+    padding: 1rem;
+    padding-bottom: 0;
 }
 
 #sigmagraph-section > .visualization-layout {

@@ -61,10 +61,19 @@ def is_label_predicate(pred: str) -> bool:
 # ── Triple formatting ─────────────────────────────────────────────────────
 
 
+def _resolve_uri_label(uri: str, ontology_labels: dict | None) -> str:
+    """Return the ontology display label for a URI, falling back to local_name."""
+    if not ontology_labels:
+        return local_name(uri)
+    key = local_name(uri).lower()
+    return ontology_labels.get(uri) or ontology_labels.get(key) or local_name(uri)
+
+
 def _format_entity_block(
     entity_uri: str,
     triples: list[dict],
     inbound_triples: list[dict] | None = None,
+    ontology_labels: dict | None = None,
 ) -> str:
     """Build a human-readable text block for one entity.
 
@@ -72,6 +81,8 @@ def _format_entity_block(
     *inbound_triples* are incoming (entity is the object) — used to show
     relationships such as inferred/materialised inverse edges (e.g. a Contract
     that points back to this Customer via ``hasCustomer``).
+    *ontology_labels* is an optional ``{uri/name_lower → display_label}`` map
+    loaded from the domain ontology config.
     """
     lines: list[str] = []
     entity_label = local_name(entity_uri)
@@ -85,13 +96,13 @@ def _format_entity_block(
         obj = t.get("object", "")
 
         if pred == RDF_TYPE:
-            types.append(local_name(obj))
+            types.append(_resolve_uri_label(obj, ontology_labels))
         elif is_label_predicate(pred):
             labels.append(obj)
         elif is_uri(obj):
-            relationships.append((pretty_predicate(pred), local_name(obj)))
+            relationships.append((_resolve_uri_label(pred, ontology_labels), local_name(obj)))
         else:
-            attributes.append((pretty_predicate(pred), obj))
+            attributes.append((_resolve_uri_label(pred, ontology_labels), obj))
 
     # Inbound relationships: other entities that point TO this entity.
     # Excluding rdf:type and label predicates (those are class/label assertions,
@@ -104,7 +115,7 @@ def _format_entity_block(
             continue
         if is_label_predicate(pred):
             continue
-        inbound.append((local_name(subj), pretty_predicate(pred)))
+        inbound.append((local_name(subj), _resolve_uri_label(pred, ontology_labels)))
 
     display_name = labels[0] if labels else entity_label
     type_str = ", ".join(types) if types else "Unknown type"
@@ -155,7 +166,7 @@ def _merge_uri_aliases(by_subject: dict[str, list[dict]]) -> dict[str, list[dict
     return merged
 
 
-def format_find_response(data: dict) -> str:
+def format_find_response(data: dict, ontology_labels: dict | None = None) -> str:
     """Convert a /triples/find JSON response into a full-text description."""
     if not data.get("success"):
         return data.get("message", "Search failed.")
@@ -212,13 +223,14 @@ def format_find_response(data: dict) -> str:
             uri,
             by_subject.get(uri, []),
             inbound_triples=by_object.get(uri, []),
+            ontology_labels=ontology_labels,
         ))
         parts.append("")
 
     if related_uris:
         parts.append("── Related Entities (neighbors) ──")
         for uri in related_uris:
-            parts.append(_format_entity_block(uri, by_subject.get(uri, [])))
+            parts.append(_format_entity_block(uri, by_subject.get(uri, []), ontology_labels=ontology_labels))
             parts.append("")
 
     if total > len(triples):

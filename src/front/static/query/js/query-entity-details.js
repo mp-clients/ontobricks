@@ -103,8 +103,8 @@ async function showEntityDetails(entity) {
     else if (entity.typeUri) {
         classInfo = findOntologyClass(entity.typeUri);
         if (classInfo) {
-            ontologyTypeName = classInfo.name;
-            console.log('  Using Priority 2 (entity.typeUri -> classInfo.name):', ontologyTypeName);
+            ontologyTypeName = classInfo.label || classInfo.name;
+            console.log('  Using Priority 2 (entity.typeUri -> classInfo.label||name):', ontologyTypeName);
         } else {
             // Extract local part from URI
             ontologyTypeName = entity.typeUri.split('#').pop().split('/').pop() || entity.type || 'Unknown';
@@ -118,8 +118,8 @@ async function showEntityDetails(entity) {
         if (extractedClass) {
             classInfo = findOntologyClass(extractedClass);
             if (classInfo) {
-                ontologyTypeName = classInfo.name;
-                console.log('  Using Priority 3 (extractedClass -> classInfo.name):', ontologyTypeName);
+                ontologyTypeName = classInfo.label || classInfo.name;
+                console.log('  Using Priority 3 (extractedClass -> classInfo.label||name):', ontologyTypeName);
             } else {
                 // Use extracted class name even without full ontology info
                 ontologyTypeName = extractedClass;
@@ -131,8 +131,8 @@ async function showEntityDetails(entity) {
     if (ontologyTypeName === 'Unknown' && entity.type) {
         classInfo = findOntologyClass(entity.type);
         if (classInfo) {
-            ontologyTypeName = classInfo.name;
-            console.log('  Using Priority 4 (entity.type -> classInfo.name):', ontologyTypeName);
+            ontologyTypeName = classInfo.label || classInfo.name;
+            console.log('  Using Priority 4 (entity.type -> classInfo.label||name):', ontologyTypeName);
         } else {
             console.log('  Priority 4: entity.type does not match ontology class, keeping Unknown');
         }
@@ -445,7 +445,7 @@ async function showEntityDetails(entity) {
             html += `
                 <div class="entity-relationship-item">
                     <span class="rel-direction">→</span>
-                    <span class="rel-predicate">${escapeHtml(rel.predicate)}</span>
+                    <span class="rel-predicate">${escapeHtml((typeof findOntologyProperty === 'function' && findOntologyProperty(rel.predicate))?.label || rel.predicate)}</span>
                     <span class="rel-direction">→</span>
                     <span class="rel-target" onclick="selectEntityById('${escapeHtml(targetId)}')">${targetIcon} ${escapeHtml(targetLabel)}</span>
                 </div>
@@ -470,7 +470,7 @@ async function showEntityDetails(entity) {
                 <div class="entity-relationship-item">
                     <span class="rel-target" onclick="selectEntityById('${escapeHtml(sourceId)}')">${sourceIcon} ${escapeHtml(sourceLabel)}</span>
                     <span class="rel-direction">→</span>
-                    <span class="rel-predicate">${escapeHtml(rel.predicate)}</span>
+                    <span class="rel-predicate">${escapeHtml((typeof findOntologyProperty === 'function' && findOntologyProperty(rel.predicate))?.label || rel.predicate)}</span>
                     <span class="rel-direction">→</span>
                 </div>
             `;
@@ -511,10 +511,12 @@ function showRelationshipDetails(relationship) {
     const targetNode = typeof relationship.target === 'object' ? relationship.target : 
         d3NodesData.find(n => n.id === relationship.target);
     
-    // Get predicate local name
+    // Get predicate display label (ontology label → local name → raw)
     const predicateUri = relationship.predicate || '';
-    const predicateLabel = predicateUri.includes('#') ? predicateUri.split('#').pop() : 
+    const predicateLocalName = predicateUri.includes('#') ? predicateUri.split('#').pop() :
         predicateUri.includes('/') ? predicateUri.split('/').pop() : predicateUri;
+    const _predPropInfo = (typeof findOntologyProperty === 'function') ? findOntologyProperty(predicateUri) : null;
+    const predicateLabel = (_predPropInfo && _predPropInfo.label) ? _predPropInfo.label : predicateLocalName;
     
     // Get icons for source and target
     const sourceIcon = sourceNode ? getEntityIcon(sourceNode) : '📦';

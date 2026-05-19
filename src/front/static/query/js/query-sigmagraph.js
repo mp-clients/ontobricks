@@ -581,6 +581,16 @@ var SigmaGraph = (function () {
             var edgeColor = isInferred ? '#4ECDC4' : '#bbb';
             var edgeSize = isInferred ? 2.5 : 1.5;
 
+            // Resolve predicate display label from ontology; always fall back to pred name
+            var predDisplay = pred;
+            try {
+                if (typeof findOntologyProperty === 'function') {
+                    var predPropInfo = findOntologyProperty(pred) || findOntologyProperty(l.predicateUri || '');
+                    if (predPropInfo && predPropInfo.label) predDisplay = predPropInfo.label;
+                }
+            } catch (_) {}
+            if (!predDisplay) predDisplay = pred;
+
             // Deduplicate edges to/from super-nodes
             var edgeKey = s + '|' + t + '|' + pred;
             if (_superNodeIds.has(s) || _superNodeIds.has(t)) {
@@ -590,7 +600,8 @@ var SigmaGraph = (function () {
 
             try {
                 graph.addEdge(s, t, {
-                    label: isInferred ? pred + ' [inferred]' : pred,
+                    label: isInferred ? predDisplay + ' [inferred]' : predDisplay,
+                    predicateKey: pred,
                     size: edgeSize,
                     color: edgeColor,
                     type: isInferred ? 'dashed' : undefined,
@@ -1035,7 +1046,7 @@ var SigmaGraph = (function () {
 
     function _edgeReducer(edge, data) {
         var res = Object.assign({}, data);
-        var pred = data.label || '';
+        var pred = data.predicateKey || data.label || '';
 
         // Edge type filter
         if (_visibleEdgeTypes.size > 0 && pred && !_visibleEdgeTypes.has(pred)) {
@@ -1218,18 +1229,18 @@ var SigmaGraph = (function () {
             }
         } else if (entity.typeUri) {
             if (typeof findOntologyClass === 'function') classInfo = findOntologyClass(entity.typeUri);
-            if (classInfo) { ontologyTypeName = classInfo.name; }
+            if (classInfo) { ontologyTypeName = classInfo.label || classInfo.name; }
             else { ontologyTypeName = entity.typeUri.split('#').pop().split('/').pop() || entity.type || 'Unknown'; }
         } else if (entity.id) {
             var extractedClass = (typeof extractClassFromUri === 'function') ? extractClassFromUri(entity.id) : null;
             if (extractedClass) {
                 if (typeof findOntologyClass === 'function') classInfo = findOntologyClass(extractedClass);
-                ontologyTypeName = classInfo ? classInfo.name : extractedClass;
+                ontologyTypeName = classInfo ? (classInfo.label || classInfo.name) : extractedClass;
             }
         }
         if (ontologyTypeName === 'Unknown' && entity.type && typeof findOntologyClass === 'function') {
             classInfo = findOntologyClass(entity.type);
-            if (classInfo) ontologyTypeName = classInfo.name;
+            if (classInfo) ontologyTypeName = classInfo.label || classInfo.name;
         }
 
         var ontologyTypeEmoji = (classInfo && classInfo.emoji) || (entityMapping && entityMapping.emoji) || icon;
@@ -1314,7 +1325,9 @@ var SigmaGraph = (function () {
         var infoBody = '<div class="entity-detail-item"><span class="detail-key"><i class="bi bi-box text-primary"></i> Type</span>' +
             '<span class="detail-value">' + esc(ontologyTypeName) + '</span></div>' +
             '<div class="entity-detail-item"><span class="detail-key"><i class="bi bi-key-fill text-warning"></i> ID</span>' +
-            '<span class="detail-value">' + esc(actualIdValue || 'N/A') + '</span></div>';
+            '<span class="detail-value">' + esc(actualIdValue || 'N/A') + '</span></div>' +
+            (actualLabelValue ? '<div class="entity-detail-item"><span class="detail-key"><i class="bi bi-tag text-info"></i> Label</span>' +
+            '<span class="detail-value">' + esc(actualLabelValue) + '</span></div>' : '');
         if (_clusterAssignments && _clusterAssignments[nodeId] !== undefined) {
             var _cid = _clusterAssignments[nodeId];
             infoBody += '<div class="entity-detail-item"><span class="detail-key"><i class="bi bi-bezier2 text-success"></i> Cluster</span>' +
@@ -1404,9 +1417,11 @@ var SigmaGraph = (function () {
                 var targetNode = d3NodesData.find(function (n) { return n.id === targetId; });
                 var targetLabel = targetNode ? ((typeof getDisplayLabel === 'function') ? getDisplayLabel(targetNode) : (targetNode.label || '')) : _extractLocalName(targetId);
                 var targetIcon = targetNode ? ((typeof getEntityIcon === 'function') ? getEntityIcon(targetNode) : '🔷') : '🔷';
+                var outPredInfo = (typeof findOntologyProperty === 'function') ? findOntologyProperty(rel.predicate) : null;
+                var outPredLabel = (outPredInfo && (outPredInfo.label || outPredInfo.name)) ? (outPredInfo.label || outPredInfo.name) : rel.predicate;
                 outBody += '<div class="entity-relationship-item">' +
                     '<span class="rel-direction">→</span> ' +
-                    '<span class="rel-predicate">' + esc(rel.predicate) + '</span> ' +
+                    '<span class="rel-predicate">' + esc(outPredLabel) + '</span> ' +
                     '<span class="rel-direction">→</span> ' +
                     '<span class="rel-target" onclick="SigmaGraph.selectEntity(\'' + esc(targetId) + '\')">' + targetIcon + ' ' + esc(targetLabel) + '</span></div>';
             });
@@ -1420,10 +1435,12 @@ var SigmaGraph = (function () {
                 var sourceNode = d3NodesData.find(function (n) { return n.id === sourceId; });
                 var sourceLabel = sourceNode ? ((typeof getDisplayLabel === 'function') ? getDisplayLabel(sourceNode) : (sourceNode.label || '')) : _extractLocalName(sourceId);
                 var sourceIcon = sourceNode ? ((typeof getEntityIcon === 'function') ? getEntityIcon(sourceNode) : '🔷') : '🔷';
+                var inPredInfo = (typeof findOntologyProperty === 'function') ? findOntologyProperty(rel.predicate) : null;
+                var inPredLabel = (inPredInfo && (inPredInfo.label || inPredInfo.name)) ? (inPredInfo.label || inPredInfo.name) : rel.predicate;
                 inBody += '<div class="entity-relationship-item">' +
                     '<span class="rel-target" onclick="SigmaGraph.selectEntity(\'' + esc(sourceId) + '\')">' + sourceIcon + ' ' + esc(sourceLabel) + '</span> ' +
                     '<span class="rel-direction">→</span> ' +
-                    '<span class="rel-predicate">' + esc(rel.predicate) + '</span> ' +
+                    '<span class="rel-predicate">' + esc(inPredLabel) + '</span> ' +
                     '<span class="rel-direction">→</span></div>';
             });
             html += _sec('bi bi-arrow-left-circle', 'Incoming (' + incomingRels.length + ')', inBody, false);
@@ -1446,8 +1463,10 @@ var SigmaGraph = (function () {
         var targetNode = (typeof d3NodesData !== 'undefined') ? d3NodesData.find(function (n) { return n.id === target; }) : null;
 
         var predicateUri = data.predicate || attrs.label || '';
-        var predicateLabel = predicateUri.indexOf('#') >= 0 ? predicateUri.split('#').pop() :
+        var predicateLocalName = predicateUri.indexOf('#') >= 0 ? predicateUri.split('#').pop() :
             predicateUri.indexOf('/') >= 0 ? predicateUri.split('/').pop() : predicateUri;
+        var _propInfo = (typeof findOntologyProperty === 'function') ? findOntologyProperty(predicateUri) : null;
+        var predicateLabel = (_propInfo && (_propInfo.label || _propInfo.name)) ? (_propInfo.label || _propInfo.name) : predicateLocalName;
 
         var sourceIcon = sourceNode ? ((typeof getEntityIcon === 'function') ? getEntityIcon(sourceNode) : '📦') : '📦';
         var targetIcon = targetNode ? ((typeof getEntityIcon === 'function') ? getEntityIcon(targetNode) : '📦') : '📦';
@@ -1563,7 +1582,7 @@ var SigmaGraph = (function () {
         // Edge types
         var rels = {};
         _graph.forEachEdge(function (e, attrs) {
-            var p = attrs.label || 'unknown';
+            var p = attrs.predicateKey || attrs.label || 'unknown';
             rels[p] = (rels[p] || 0) + 1;
         });
         var rHtml = '';
@@ -2094,7 +2113,7 @@ var SigmaGraph = (function () {
                 if (value) paramValues[paramKeyword] = { value: value, pageId: pageId, widgetId: widgetId };
             });
             var dashUrl = (typeof buildDashboardUrl === 'function') ? buildDashboardUrl(meta.dashboardUrl, meta.actualIdValue, paramValues) : meta.dashboardUrl;
-            var className = (meta.classInfo && meta.classInfo.name) || (meta.entityMapping && meta.entityMapping.className) || '';
+            var className = (meta.classInfo && (meta.classInfo.label || meta.classInfo.name)) || (meta.entityMapping && meta.entityMapping.className) || '';
             if (items) items += '<div class="ctx-divider"></div>';
             items += '<div class="ctx-header">Dashboard</div>';
             items += '<div class="ctx-item" data-sg-node-action="dashboard" data-url="' + esc(dashUrl) + '" data-class="' + esc(className) + '" data-id="' + esc(meta.actualIdValue || '') + '">' +
@@ -2444,7 +2463,7 @@ var SigmaGraph = (function () {
         selectAllTypes: function () {
             if (!_graph) return;
             _graph.forEachNode(function (n, a) { _visibleTypes.add(a.entityType || 'Unknown'); });
-            _graph.forEachEdge(function (e, a) { _visibleEdgeTypes.add(a.label || ''); });
+            _graph.forEachEdge(function (e, a) { _visibleEdgeTypes.add(a.predicateKey || a.label || ''); });
             _populateTypes();
             if (_renderer) _renderer.refresh();
         },

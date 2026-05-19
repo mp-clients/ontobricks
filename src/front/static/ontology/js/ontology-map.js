@@ -201,6 +201,7 @@ async function initOntologyMap() {
                     source: source,
                     target: target,
                     name: prop.name,
+                    label: prop.label || prop.name,
                     type: 'relationship',
                     direction: prop.direction || 'forward'
                 });
@@ -441,7 +442,7 @@ async function initOntologyMap() {
         .enter()
         .append('text')
         .attr('class', 'map-link-label')
-        .text(d => d.name);
+        .text(d => d.label || d.name);
 
     // Track if we're dragging to prevent click after drag
     let isDragging = false;
@@ -478,11 +479,11 @@ async function initOntologyMap() {
     nodeElements.append('text')
         .attr('class', 'map-node-label')
         .attr('dy', 35)
-        .text(d => d.name);
+        .text(d => d.label || d.name);
 
     // Tooltip on hover
     nodeElements.append('title')
-        .text(d => d.name);
+        .text(d => d.label || d.name);
 
     // Click to edit entity (only if not dragging)
     nodeElements.on('click', function(event, d) {

@@ -52,6 +52,7 @@ let entityMappings = {};
 
 // Store ontology classes (for dashboard and other class metadata)
 let ontologyClasses = {};
+let ontologyProperties = {};
 
 // Ontology icon map (class name/URI -> emoji)
 let taxonomyIcons = {};
