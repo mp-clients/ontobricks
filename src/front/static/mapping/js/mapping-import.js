@@ -4,12 +4,12 @@
  */
 
 // --- R2RML Import: Local file ---
-document.getElementById('importR2rmlLocalBtn').addEventListener('click', function() {
-    document.getElementById('importR2rmlFileInput').click();
+document.getElementById('importR2rmlLocalBtn')?.addEventListener('click', function() {
+    document.getElementById('importR2rmlFileInput')?.click();
 });
 
 // --- R2RML Import: Unity Catalog ---
-document.getElementById('importR2rmlUCBtn').addEventListener('click', function() {
+document.getElementById('importR2rmlUCBtn')?.addEventListener('click', function() {
     UCFileDialog.open({
         mode: 'load',
         title: 'Import R2RML from Unity Catalog',
@@ -21,7 +21,7 @@ document.getElementById('importR2rmlUCBtn').addEventListener('click', function()
 });
 
 // --- R2RML Import: file input change handler ---
-document.getElementById('importR2rmlFileInput').addEventListener('change', async function(e) {
+document.getElementById('importR2rmlFileInput')?.addEventListener('change', async function(e) {
     const file = e.target.files[0];
     if (!file) return;
 
