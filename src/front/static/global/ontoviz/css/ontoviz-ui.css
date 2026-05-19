@@ -67,6 +67,7 @@
     top: 16px;
     right: 16px;
     display: flex;
+    align-items: center;
     gap: 8px;
     background: var(--ovz-toolbar-bg);
     backdrop-filter: blur(12px);
@@ -117,6 +118,7 @@
     background: var(--ovz-entity-border);
     margin: 4px 0;
 }
+
 
 /* Status Bar - Note: JS uses .ovz-status */
 .ovz-status-bar,

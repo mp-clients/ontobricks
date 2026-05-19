@@ -41,6 +41,7 @@
         constructor(options = {}) {
             this.id = options.id || Utils.generateId();
             this.name = options.name || 'NewEntity';
+            this.label = options.label || options.name || 'NewEntity';
             this.icon = options.icon || '📦'; // Default emoji icon
             this.description = options.description || '';
             this.x = options.x ?? 100;
@@ -106,6 +107,7 @@
         constructor(options = {}) {
             this.id = options.id || Utils.generateId();
             this.name = options.name || 'relates_to';
+            this.label = options.label || options.name || 'relates_to';
             this.sourceEntityId = options.sourceEntityId || null;
             this.targetEntityId = options.targetEntityId || null;
             this.sourceCardinality = options.sourceCardinality || '1';
@@ -349,9 +351,16 @@
                 <button class="ovz-toolbar-btn" data-action="palette" title="Show/Hide Elements">
                     <span>👁</span>
                 </button>
+                <div class="ovz-toolbar-divider"></div>
+                <button class="ovz-toolbar-btn ovz-active" data-action="toggle-label" title="Showing labels — click to show names">
+                    <span>🏷</span>
+                </button>
             `;
             this.container.appendChild(toolbar);
             this.toolbar = toolbar;
+
+            // Label/name display toggle state
+            this.showLabel = true;
 
             // Initialize visibility state
             this.visibilityState = {
@@ -385,6 +394,45 @@
                     case 'palette':
                         this._togglePalettePopup(btn);
                         break;
+                    case 'toggle-label':
+                        this.showLabel = !this.showLabel;
+                        btn.classList.toggle('ovz-active', this.showLabel);
+                        btn.title = this.showLabel ? 'Showing labels — click to show names' : 'Showing names — click to show labels';
+                        this._refreshDisplayLabels();
+                        break;
+                }
+            });
+        }
+
+        // ==========================================
+        // Label / Name display toggle
+        // ==========================================
+        _refreshDisplayLabels() {
+            const useLabel = this.showLabel;
+
+            // Update entity titles
+            this.entities.forEach(entity => {
+                if (!entity.element) return;
+                const display = useLabel ? (entity.label || entity.name) : entity.name;
+                const textEl = entity.element.querySelector('.ovz-entity-title-text');
+                if (textEl) {
+                    textEl.textContent = display;
+                } else {
+                    const input = entity.element.querySelector('.ovz-entity-title input');
+                    if (input) input.value = display;
+                }
+            });
+
+            // Update relationship labels
+            this.relationships.forEach(rel => {
+                if (!rel.labelElement) return;
+                const display = useLabel ? (rel.label || rel.name) : rel.name;
+                const textEl = rel.labelElement.querySelector('.ovz-rel-name-text');
+                if (textEl) {
+                    textEl.textContent = display;
+                } else {
+                    const input = rel.labelElement.querySelector('.ovz-rel-name-input');
+                    if (input) input.value = display;
                 }
             });
         }
@@ -416,7 +464,7 @@
                     <label class="ovz-palette-item">
                         <input type="checkbox" data-type="entity" data-id="${id}" ${isVisible ? 'checked' : ''}>
                         <span class="ovz-palette-icon">${icon}</span>
-                        <span class="ovz-palette-name">${entity.name}</span>
+                        <span class="ovz-palette-name">${this.showLabel !== false ? (entity.label || entity.name) : entity.name}</span>
                     </label>
                 `;
             });
@@ -1067,10 +1115,11 @@
                 </div>
             `;
 
-            // Entity title - use text in view-only, input in edit mode
+            // Entity title - display label or name depending on toggle
+            const entityDisplay = this.showLabel !== false ? (entity.label || entity.name) : entity.name;
             const entityTitleHTML = isViewOnly 
-                ? `<span class="ovz-entity-title-text">${this._escapeHtml(entity.name)}</span>`
-                : `<span class="ovz-entity-title"><input type="text" value="${this._escapeHtml(entity.name)}" data-field="name" spellcheck="false"></span>`;
+                ? `<span class="ovz-entity-title-text">${this._escapeHtml(entityDisplay)}</span>`
+                : `<span class="ovz-entity-title"><input type="text" value="${this._escapeHtml(entityDisplay)}" data-field="name" spellcheck="false"></span>`;
 
             // Icon - clickable only in edit mode
             const iconAttr = isViewOnly ? '' : 'data-action="edit-icon" title="Click to change icon"';
@@ -2109,10 +2158,11 @@
             }
             // Note: For bidirectional relationships, create two separate arrows
             
-            // Relationship name - text in view-only, input in edit mode
+            // Relationship label - display label or name depending on toggle
+            const relDisplay = this.showLabel !== false ? (relationship.label || relationship.name) : relationship.name;
             const relNameHTML = isViewOnly 
-                ? `<span class="ovz-rel-name-text">${this._escapeHtml(relationship.name)}</span>`
-                : `<input type="text" value="${this._escapeHtml(relationship.name)}" spellcheck="false" class="ovz-rel-name-input">`;
+                ? `<span class="ovz-rel-name-text">${this._escapeHtml(relDisplay)}</span>`
+                : `<input type="text" value="${this._escapeHtml(relDisplay)}" spellcheck="false" class="ovz-rel-name-input">`;
             
             // Action buttons - only shown in edit mode
             const relActionsHTML = isViewOnly ? '' : `
