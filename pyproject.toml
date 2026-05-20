@@ -19,7 +19,7 @@ dependencies = [
     "rdflib>=7.6.0",
     "python-dotenv>=1.2.2",
     "requests>=2.33.0",
-    "strawberry-graphql[fastapi]>=0.312.3",
+    "strawberry-graphql[fastapi]>=0.315.4",
     "mlflow>=3.11.1",
     "apscheduler>=3.10,<4",
     "owlrl>=7.0.0",
@@ -76,6 +76,9 @@ constraint-dependencies = [
     #   GHSA-mf9v-mfxr-j63j  decompression-bomb bypasses in streaming API parts
     #   GHSA-qccp-gfcp-xxvc  sensitive headers forwarded in proxied low-level redirects
     "urllib3>=2.7.0",
+    # idna 3.13 closes bypass of CVE-2024-3651 mitigation (GHSA-65pc-fj4g-8rjx):
+    #   specially crafted inputs to idna.encode() could still reach quadratic-time path.
+    "idna>=3.13",
 ]
 
 [tool.pytest.ini_options]

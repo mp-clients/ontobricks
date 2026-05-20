@@ -47,7 +47,7 @@
         const popup = popupEl();
         if (!popup) return;
 
-        const isVisible = popup.style.display !== 'none';
+        const isVisible = getComputedStyle(popup).display !== 'none';
         popup.style.display = isVisible ? 'none' : 'flex';
 
         const btn = toggleBtn();
