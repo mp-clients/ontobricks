@@ -296,6 +296,8 @@ document.getElementById('importFhirBtn').addEventListener('click', async functio
         }
     });
 
+    const version = (document.getElementById('fhirVersionSelect')?.value || 'R5').toUpperCase();
+
     if (domains.length === 1) {
         const proceed = await showConfirmDialog({
             title: 'Import Foundation only?',
@@ -316,13 +318,13 @@ document.getElementById('importFhirBtn').addEventListener('click', async functio
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span> Importing...';
     progress.classList.remove('d-none');
-    statusEl.textContent = 'Fetching FHIR R5 ontology from hl7.org... This may take 20-40 seconds.';
+    statusEl.textContent = `Fetching FHIR ${version} ontology from hl7.org... This may take 20-40 seconds.`;
 
     try {
         const response = await fetch('/ontology/import-fhir', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ domains: domains }),
+            body: JSON.stringify({ domains: domains, version: version }),
             credentials: 'same-origin'
         });
 
@@ -331,7 +333,7 @@ document.getElementById('importFhirBtn').addEventListener('click', async functio
         if (result.success) {
             const stats = result.stats || {};
             showNotification(
-                'FHIR imported: ' + (stats.classes || 0) + ' classes, ' +
+                `FHIR ${version} imported: ` + (stats.classes || 0) + ' classes, ' +
                 (stats.properties || 0) + ' properties',
                 'success'
             );

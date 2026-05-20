@@ -924,9 +924,17 @@ class Ontology:
         return ontology_info, classes, properties
 
     def import_industry_ontology(
-        self, kind: IndustryKind, domain_keys: List[str]
+        self,
+        kind: IndustryKind,
+        domain_keys: List[str],
+        version: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Fetch industry modules, merge, parse, persist to project session.
+
+        Args:
+            kind: Industry standard identifier (fibo, cdisc, iof, fhir).
+            domain_keys: Domain bucket keys to import.
+            version: Version string for importers that support it (currently FHIR only).
 
         Returns the same dict shape as the former /import-fibo|cdisc|iof handlers.
         """
@@ -934,7 +942,12 @@ class Ontology:
             raise ValidationError(_INDUSTRY_EMPTY_MESSAGE[kind])
 
         try:
-            result = _INDUSTRY_FETCH[kind](domain_keys)
+            if kind == "fhir":
+                from back.core.industry.fhir import FhirImportService
+                fhir_version = version or FhirImportService.DEFAULT_VERSION
+                result = _INDUSTRY_FETCH[kind](domain_keys, version=fhir_version)
+            else:
+                result = _INDUSTRY_FETCH[kind](domain_keys)
 
             info = result["ontology_info"]
             if kind == "cdisc":
@@ -946,9 +959,10 @@ class Ontology:
                 base_uri = info.get("uri", "https://spec.edmcouncil.org/fibo/ontology/")
                 desc_prefix = "Financial Industry Business Ontology (FIBO) – "
             elif kind == "fhir":
-                ont_name = info.get("name", "HL7 FHIR R5")
+                fhir_ver = info.get("version", fhir_version)
+                ont_name = info.get("name", f"HL7 FHIR {fhir_ver}")
                 base_uri = info.get("base_uri", "http://hl7.org/fhir/")
-                desc_prefix = "HL7 FHIR R5 – "
+                desc_prefix = f"HL7 FHIR {fhir_ver} – "
             else:
                 ont_name = info.get("name", "IOF")
                 base_uri = info.get(

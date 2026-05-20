@@ -344,11 +344,11 @@
         <!-- FHIR Tab -->
         <div class="tab-pane fade" id="pane-fhir" role="tabpanel" aria-labelledby="tab-fhir">
             <h6 class="mb-2">
-                <i class="bi bi-hospital"></i> Import HL7 FHIR R5 Ontology
+                <i class="bi bi-hospital"></i> Import HL7 FHIR Ontology
                 <span class="badge bg-danger ms-2">Healthcare</span>
             </h6>
             <p class="text-muted small mb-2">
-                <a href="https://hl7.org/fhir/R5/" target="_blank" rel="noopener">HL7 FHIR R5</a>
+                <a href="https://www.hl7.org/fhir/" target="_blank" rel="noopener">HL7 FHIR</a>
                 (Fast Healthcare Interoperability Resources) is the leading standard for
                 healthcare data exchange, published by
                 <a href="https://www.hl7.org/" target="_blank" rel="noopener">HL7 International</a>.
@@ -358,10 +358,20 @@
             <p class="text-muted small mb-3">
                 Select the resource domains you need below. <strong>Foundation</strong>
                 is always included as it provides the base Resource and DomainResource types.
-                The ontology is fetched directly from
-                <a href="https://hl7.org/fhir/R5/fhir.ttl" target="_blank" rel="noopener">hl7.org</a>
-                as a single Turtle file (~3 MB).
+                The ontology is fetched directly from hl7.org as a single Turtle file (~3 MB).
             </p>
+
+            <!-- Version selector -->
+            <div class="mb-3">
+                <label for="fhirVersionSelect" class="form-label small fw-semibold">
+                    <i class="bi bi-tag me-1"></i>FHIR Version
+                </label>
+                <select class="form-select form-select-sm" id="fhirVersionSelect" style="max-width: 220px;">
+                    <option value="R4">R4 (4.0.1)</option>
+                    <option value="R4B">R4B (4.3.0)</option>
+                    <option value="R5" selected>R5 (5.0.0) — latest</option>
+                </select>
+            </div>
 
             <!-- Domain checkboxes -->
             <div class="row g-2 mb-3" id="fhirDomainCheckboxes">

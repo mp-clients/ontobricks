@@ -212,13 +212,22 @@ class FhirImportService:
 
     _REQUEST_TIMEOUT = 60  # FHIR fhir.ttl is ~3 MB — allow generous timeout
 
+    # Supported FHIR versions and their publication base URLs.
+    # The namespace URI is identical across all versions.
+    FHIR_VERSIONS: Dict[str, Dict[str, str]] = {
+        "R4":  {"label": "R4 (4.0.1)",  "base_url": "https://hl7.org/fhir/R4"},
+        "R4B": {"label": "R4B (4.3.0)", "base_url": "https://hl7.org/fhir/R4B"},
+        "R5":  {"label": "R5 (5.0.0)",  "base_url": "https://hl7.org/fhir/R5"},
+    }
+    DEFAULT_VERSION = "R5"
+
     # -------------------------------------------------------------------------
     # Catalog
     # -------------------------------------------------------------------------
 
     @staticmethod
     def get_fhir_catalog() -> List[Dict[str, Any]]:
-        """Return the FHIR domain catalog for the frontend."""
+        """Return the FHIR domain catalog and supported versions for the frontend."""
         catalog = []
         for key, domain in FhirImportService.FHIR_DOMAINS.items():
             resource_count = len(FhirImportService._DOMAIN_RESOURCES.get(key, []))
@@ -235,22 +244,45 @@ class FhirImportService:
             )
         return catalog
 
+    @staticmethod
+    def get_fhir_versions() -> List[Dict[str, str]]:
+        """Return supported FHIR versions as ``[{key, label, default}]``."""
+        return [
+            {
+                "key": k,
+                "label": v["label"],
+                "default": k == FhirImportService.DEFAULT_VERSION,
+            }
+            for k, v in FhirImportService.FHIR_VERSIONS.items()
+        ]
+
     # -------------------------------------------------------------------------
     # Fetch
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def _fetch_fhir_ttl() -> str:
-        """Download the FHIR R5 OWL/Turtle file from hl7.org.
+    def _fetch_fhir_ttl(version: str = "R5") -> str:
+        """Download the FHIR OWL/Turtle file for the given version from hl7.org.
+
+        Args:
+            version: FHIR release key — one of ``FHIR_VERSIONS`` (e.g. ``"R5"``).
 
         Returns:
             Raw Turtle content as a string.
 
         Raises:
+            ValidationError: If the version key is unknown.
             InfrastructureError: If the download fails or returns non-Turtle content.
         """
-        url = f"{FHIR_BASE_URL}/fhir.ttl"
-        logger.info("Fetching FHIR OWL from %s", url)
+        version_info = FhirImportService.FHIR_VERSIONS.get(version)
+        if not version_info:
+            supported = ", ".join(FhirImportService.FHIR_VERSIONS)
+            raise ValidationError(
+                f"Unknown FHIR version '{version}'. Supported: {supported}."
+            )
+
+        url = f"{version_info['base_url']}/fhir.ttl"
+        logger.info("Fetching FHIR %s OWL from %s", version, url)
         try:
             resp = requests.get(
                 url,
@@ -263,31 +295,31 @@ class FhirImportService:
             )
         except requests.exceptions.Timeout:
             raise InfrastructureError(
-                f"Timeout fetching FHIR ontology from {url}. "
+                f"Timeout fetching FHIR {version} ontology from {url}. "
                 "The HL7 server may be slow. Try again or import manually "
                 "via 'Import OWL' using a locally downloaded fhir.ttl."
             )
         except requests.exceptions.RequestException as exc:
             raise InfrastructureError(
-                f"Network error fetching FHIR ontology: {exc}",
+                f"Network error fetching FHIR {version} ontology: {exc}",
                 detail=str(exc),
             )
 
         if resp.status_code != 200:
             raise InfrastructureError(
-                f"FHIR ontology server returned HTTP {resp.status_code}.",
+                f"FHIR {version} ontology server returned HTTP {resp.status_code}.",
                 detail=url,
             )
 
         text = resp.text.strip()
         if text.startswith("<!DOCTYPE") or text.startswith("<html"):
             raise InfrastructureError(
-                "FHIR ontology URL returned an HTML page instead of Turtle. "
+                f"FHIR {version} ontology URL returned an HTML page instead of Turtle. "
                 "The HL7 server may be temporarily unavailable.",
                 detail=url,
             )
 
-        logger.info("Downloaded FHIR OWL (%d bytes)", len(resp.content))
+        logger.info("Downloaded FHIR %s OWL (%d bytes)", version, len(resp.content))
         return text
 
     # FHIR primitive datatype local-names — owl:allValuesFrom pointing to these
@@ -457,6 +489,7 @@ class FhirImportService:
     def _transform_fhir_to_ontobricks(
         graph: Graph,
         domain_keys: List[str],
+        version: str = "R5",
     ) -> Dict[str, Any]:
         """Convert a parsed FHIR OWL graph to OntoBricks classes and properties.
 
@@ -604,17 +637,19 @@ class FhirImportService:
         # Total data-property count for stats
         total_data_props = sum(len(c.get("dataProperties", [])) for c in classes)
 
+        ver_info = FhirImportService.FHIR_VERSIONS.get(version, FhirImportService.FHIR_VERSIONS["R5"])
+        ttl_url = f"{ver_info['base_url']}/fhir.ttl"
         return {
             "classes": classes,
             "properties": all_obj_props,
             "ontology_info": {
-                "name": f"HL7 FHIR R5 — {domain_names}",
+                "name": f"HL7 FHIR {version} — {domain_names}",
                 "base_uri": FHIR_NS,
                 "description": (
-                    f"HL7 FHIR R5 ontology, domains: {domain_names}. "
-                    "Source: https://hl7.org/fhir/R5/fhir.ttl"
+                    f"HL7 FHIR {version} ontology, domains: {domain_names}. "
+                    f"Source: {ttl_url}"
                 ),
-                "version": "R5",
+                "version": version,
             },
             "stats": {
                 "classes": len(classes),
@@ -627,11 +662,15 @@ class FhirImportService:
     # -------------------------------------------------------------------------
 
     @staticmethod
-    def fetch_and_parse_fhir(domain_keys: List[str]) -> Dict[str, Any]:
-        """Fetch FHIR R5 OWL, parse, filter by domain, return OntoBricks structures.
+    def fetch_and_parse_fhir(
+        domain_keys: List[str],
+        version: str = "R5",
+    ) -> Dict[str, Any]:
+        """Fetch FHIR OWL for the given version, parse it, filter by domain.
 
         Args:
             domain_keys: List of domain keys (e.g. ["FOUNDATION", "CLINICAL"]).
+            version: FHIR release — one of ``FHIR_VERSIONS`` keys (default ``"R5"``).
 
         Returns:
             dict with keys: success, message, ontology_info, classes, properties,
@@ -640,25 +679,32 @@ class FhirImportService:
         if not domain_keys:
             raise ValidationError("No FHIR domains selected.")
 
+        version = version.upper() if version else FhirImportService.DEFAULT_VERSION
+        if version not in FhirImportService.FHIR_VERSIONS:
+            supported = ", ".join(FhirImportService.FHIR_VERSIONS)
+            raise ValidationError(
+                f"Unknown FHIR version '{version}'. Supported: {supported}."
+            )
+
         # FOUNDATION always auto-included
         if "FOUNDATION" not in domain_keys:
             domain_keys = ["FOUNDATION"] + list(domain_keys)
 
         start = time.time()
 
-        ttl_content = FhirImportService._fetch_fhir_ttl()
+        ttl_content = FhirImportService._fetch_fhir_ttl(version)
 
         graph = Graph()
         try:
             graph.parse(data=ttl_content, format="turtle")
         except Exception as exc:
             raise ValidationError(
-                "Failed to parse FHIR Turtle ontology.", detail=str(exc)
+                f"Failed to parse FHIR {version} Turtle ontology.", detail=str(exc)
             ) from exc
 
-        logger.info("Parsed FHIR graph: %d triples", len(graph))
+        logger.info("Parsed FHIR %s graph: %d triples", version, len(graph))
 
-        mapped = FhirImportService._transform_fhir_to_ontobricks(graph, domain_keys)
+        mapped = FhirImportService._transform_fhir_to_ontobricks(graph, domain_keys, version)
 
         elapsed = time.time() - start
         domain_names = ", ".join(
@@ -668,7 +714,7 @@ class FhirImportService:
         )
         stats = mapped["stats"]
         msg = (
-            f"FHIR R5 imported: {stats['classes']} classes, "
+            f"FHIR {version} imported: {stats['classes']} classes, "
             f"{stats['properties']} properties from {domain_names} "
             f"in {elapsed:.1f}s"
         )
