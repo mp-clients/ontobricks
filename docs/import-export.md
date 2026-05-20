@@ -1,10 +1,57 @@
-# Registry Import / Export (CLI)
+# Registry Import / Export
 
-OntoBricks lets you move a curated subset of a domain registry between
-Databricks environments using a **command-line tool** (`scripts/registry_transfer.sh`).
-There is intentionally **no UI and no HTTP endpoint** for this operation —
-migrations are a deliberate, scripted activity performed by an operator who
-has access to both the source and the target Unity Catalog Volumes.
+OntoBricks provides two complementary ways to move domains between environments or
+share them with teammates:
+
+| Method | When to use | Where |
+|--------|-------------|-------|
+| **OBX UI** (`.obx` file) | Ad-hoc share, cross-tenant copy, quick backup from the browser | **Registry → Browse** → Export / Import buttons |
+| **CLI zip** (`registry_transfer.sh`) | Automated CI/CD promotion, full registry migration | Terminal / shell scripts |
+
+---
+
+## OBX Export / Import (Browser UI)
+
+Available from **Registry → Browse** via the **Export** and **Import** buttons
+(Admin role required for Import).
+
+### Export
+
+1. Click **Export** on the Registry → Browse page.
+2. Check the domains you want to include.
+3. For each domain choose a version mode:
+   - **Latest** — only the most recent version
+   - **Active** — only the version currently marked as the API/MCP active version
+   - **All** — every version
+   - **Choose…** — pick individual versions by checkbox
+4. Click **Download** — the browser downloads `ontobricks-YYYY-MM-DD.obx`.
+
+The `.obx` file is a JSON envelope carrying an integer `format_version` field
+(current: 1) plus the `ontobricks_version` that produced it, enabling a safe
+upgrade path if the format changes in future releases.
+
+### Import
+
+1. Click **Import** on the Registry → Browse page.
+2. Select the `.obx` file.
+3. The preview step shows per-domain conflict flags and a suggested rename.
+4. For each domain choose a resolution:
+   - **Skip** — leave the existing domain untouched
+   - **Overwrite** — replace all versions in the target
+   - **Rename** — write under the suggested alternative name
+5. Click **Apply**.
+
+> **Note:** The 50 MB upload cap protects the in-memory parse. For larger
+> registries use the CLI tool below.
+
+---
+
+## CLI Import / Export (`registry_transfer.sh`)
+
+For automated, scripted, or large-scale migrations an operator runs
+`scripts/registry_transfer.sh` directly. This tool has access to both the
+source and the target Unity Catalog Volumes and is the recommended path for
+CI/CD pipeline promotion.
 
 Typical use cases:
 
@@ -265,14 +312,17 @@ ONTOBRICKS_PROFILE=dst scripts/registry_transfer.sh import-commit \
   hundreds of MB of attachments may need more RAM on the host running the
   CLI.
 
-## Comparison with the Registry web UI
+## Comparison of export/import methods
 
-| Capability | Web UI (Settings → Registry) | CLI |
-|------------|-------------------------------|-----|
-| Initialize a fresh registry | Yes | No |
-| Grant domain permissions | Yes | No |
-| Browse & load domains | Yes | No |
-| Export / import between envs | No | **Yes** |
+| Capability | OBX UI (Registry → Browse) | CLI (`registry_transfer.sh`) |
+|------------|----------------------------|------------------------------|
+| No terminal required | **Yes** | No |
+| Per-domain conflict resolution UI | **Yes** | `--conflict` flag |
+| Version-mode selector | **Yes** (Latest/Active/All/Choose) | `--domain NAME:all\|Vx,Vy` |
+| Handles large registries (>50 MB) | No (50 MB cap) | **Yes** |
+| Suitable for CI/CD pipelines | No | **Yes** |
+| Includes document attachments | Yes | Yes |
+| Transfers permissions | No | Optional (`--include-permissions`) |
 
-The web UI and the CLI complement each other — the UI is for day-to-day
-domain authoring, the CLI is for environment-to-environment promotion.
+The OBX UI is the easiest option for ad-hoc or cross-tenant transfers. The CLI
+is the right choice for automated promotion pipelines and full-registry migrations.

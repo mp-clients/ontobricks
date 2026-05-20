@@ -46,6 +46,8 @@ RST summaries; see the architecture guide for the full design document.
    api/api_external
    api/app.core
    api/app.core.databricks
+   api/app.core.external
+   api/app.core.external.pitfalls
    api/app.core.graphdb
    api/app.core.graphdb.lakebase
    api/app.core.graphql

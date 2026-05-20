@@ -24,6 +24,9 @@ window.PitfallsModule = (function () {
     function init() {
         if (_initialized) return;
         _initialized = true;
+        document.getElementById('pitfallsRunBtn')?.addEventListener('click', run);
+        document.getElementById('pitfallsSelectAllBtn')?.addEventListener('click', selectAll);
+        document.getElementById('pitfallsFastBtn')?.addEventListener('click', selectFast);
         _loadTaxonomy();
     }
 

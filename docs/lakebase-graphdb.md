@@ -235,20 +235,23 @@ These drive the DAB deployment (edit before `make deploy`):
 ### 5.1 — `app_managed` (default)
 
 The FastAPI process streams R2RML rows from the SQL Warehouse and writes them
-directly into Postgres via `COPY FROM STDIN`.
+directly into the `*_sync` table via `COPY FROM STDIN`. The same 3-object
+layout used by `managed_synced` is created: a `*_sync` bulk-data table, a
+`*__app` companion for reasoning/cohort writes, and a union view for readers.
 
 ```
 R2RML view (SQL Warehouse)
     │  iter_rows batches
     ▼
-LakebaseFlatStore.bulk_insert_iter
-    │  COPY FROM STDIN (binary)
+LakebaseFlatStore.bulk_load_into_sync
+    │  COPY FROM STDIN → g_<domain>_v<n>_sync  (app-owned)
     ▼
-g_<domain>_v<n>  (Postgres table, app owns)
+g_<domain>_v<n>  (UNION VIEW over _sync + __app)
 ```
 
 - Simple setup — no Lakeflow pipelines required.
 - App process is on the hot path for large graphs.
+- Reasoning / cohort writes always go to `*__app` (consistent with `managed_synced`).
 - Suitable for most use cases.
 
 ### 5.2 — `managed_synced` (Lakeflow)
@@ -304,29 +307,25 @@ OntoBricks uses up to three Postgres schemas in the same Lakebase project:
 
 ### 6.2 — Objects per graph version
 
-**`app_managed` mode — one table per version:**
+Both `app_managed` and `managed_synced` use the same **3-object layout** per
+domain version. The difference is who writes to the `*_sync` table.
 
 | Object | Owner | Naming | Description |
 |--------|-------|--------|-------------|
-| Triple table | App | `g_<domain>_v<n>` | `(subject, predicate, object, datatype, lang)` |
-
-**`managed_synced` mode — three objects per version:**
-
-| Object | Owner | Naming | Description |
-|--------|-------|--------|-------------|
-| Synced table | Lakeflow (read-only) | `g_<domain>_v<n>_sync` | Mirrors the R2RML Delta view via snapshot; `(subject, predicate, object)` |
-| Companion table | App (read/write) | `g_<domain>_v<n>__app` | Reasoning + cohort triples; `(subject, predicate, object, datatype, lang)` |
+| Sync table | App (`app_managed`) / Lakeflow (`managed_synced`) | `g_<domain>_v<n>_sync` | Bulk warehouse data; `(subject, predicate, object, datatype, lang)`. App writes via `COPY FROM STDIN`; Lakeflow writes via snapshot pipeline. |
+| Companion table | App (read/write) | `g_<domain>_v<n>__app` | Reasoning / cohort / materialise triples; `(subject, predicate, object, datatype, lang)` |
 | UNION view | App DDL | `g_<domain>_v<n>` | `SELECT … FROM _sync UNION ALL SELECT … FROM __app`; exposes the back-compat 5-column shape |
 
 All SPARQL queries and graph traversal operations target the back-compat name
 `g_<domain>_v<n>` — no downstream code is aware of which mode is active.
 
-### 6.3 — Drop cascade (`managed_synced`)
+### 6.3 — Drop cascade (both modes)
 
 `LakebaseFlatStore.drop_table(name)` removes all three objects in order:
 1. `DROP VIEW IF EXISTS g_<domain>_v<n>` (UNION view)
 2. `DROP TABLE IF EXISTS g_<domain>_v<n>__app` (companion)
-3. `SyncedTableManager.delete(uc_name, purge_data=True)` — removes the UC synced-table registration and the underlying Postgres `_sync` table
+3. `app_managed`: `DROP TABLE IF EXISTS g_<domain>_v<n>_sync` (sync table)
+   `managed_synced`: `SyncedTableManager.delete(uc_name, purge_data=True)` — removes the UC synced-table registration and the underlying Postgres `_sync` table
 
 ---
 

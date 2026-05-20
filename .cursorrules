@@ -39,3 +39,8 @@ When asking to deploy:
 * Always synchronize the files with the server.
 * Deploy both the UI and the MCP server via databricks automation/asset bundle (DAB)
 * run "make deploy"
+
+When asking to create a Release Notes:
+* Looks at the folder ./changelogs, and use the current version (vx.x.x)
+* Build a quick summary about all the files (covering the version x.x.x) and use the file ./releases/ReleaseNotes_V0.2.0.md as template and build the current Release Notes by using the same structure.
+* Creates the new Release file : releases/ReleaseNotes_Vx.x.x.md (by using the relevant version) 

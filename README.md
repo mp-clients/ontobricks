@@ -165,9 +165,9 @@ git push origin main --tags
 
 The **graph** triple-store backend is pluggable; the abstraction (`GraphDBFactory` / `GraphDBBackend`) is preserved so additional engines can be added in the future. Today only one engine ships:
 
-- **Lakebase (Postgres)** — default; one flat `(subject, predicate, object)` table per domain version inside a configurable Postgres schema on the **App-bound** Lakebase database (same connection as the optional Lakebase registry backend). Requires the `lakebase` extra (`uv sync --extra lakebase`) so `psycopg` is installed.
+- **Lakebase (Postgres)** — default; **three Postgres objects per domain version** (`*_sync` bulk-data table, `*__app` companion for reasoning/cohort writes, `g_<dom>_v<n>` UNION view for reads) inside a configurable Postgres schema on the **App-bound** Lakebase database (same connection as the optional Lakebase registry backend). Requires the `lakebase` extra (`uv sync --extra lakebase`) so `psycopg` is installed.
 
-Engine-specific options are stored as global JSON (`graph_engine_config`). For Lakebase the supported keys are **`database`** (optional override of `PGDATABASE`), **`schema`** (optional, default `ontobricks_graph`), **`sync_mode`** (`app_managed` default, or `managed_synced` to delegate bulk ingest to a Databricks Lakeflow snapshot pipeline), **`sync_table_mode`** (`snapshot` / `triggered` / `continuous` — only `snapshot` is wired in v0.3), **`sync_timeout_s`** (default 600), **`sync_uc_catalog`** (UC catalog the synced table is registered in; defaults to the snapshot Delta catalog when unset), and **`sync_uc_schema`** (UC schema segment for the synced-table FQN; defaults to the registry UC schema so the Lakeflow object lands in the same UC namespace as other registry artefacts).
+Engine-specific options are stored as global JSON (`graph_engine_config`). For Lakebase the supported keys are **`database`** (optional override of `PGDATABASE`), **`schema`** (optional, default `ontobricks_graph`), **`sync_mode`** (`app_managed` default, or `managed_synced` to delegate bulk ingest to a Databricks Lakeflow snapshot pipeline), **`sync_table_mode`** (`snapshot` / `triggered` / `continuous` — `snapshot` is the recommended mode), **`sync_timeout_s`** (default 600), **`sync_uc_catalog`** (UC catalog the synced table is registered in; defaults to the snapshot Delta catalog when unset), and **`sync_uc_schema`** (UC schema segment for the synced-table FQN; defaults to the registry UC schema so the Lakeflow object lands in the same UC namespace as other registry artefacts). See `docs/lakebase-graphdb.md` for the full reference.
 
 > **Lakebase permission grants (three schemas).** The app service principal needs `USAGE + DML` on up to three Postgres schemas — each covered by one run of `scripts/bootstrap-lakebase-perms.sh`:
 >
@@ -185,7 +185,7 @@ Engine-specific options are stored as global JSON (`graph_engine_config`). For L
 
 ### Manual Workflow
 
-1. **Design** an ontology visually using the OntoViz canvas, or import OWL/RDFS/industry standards (FIBO, CDISC, IOF)
+1. **Design** an ontology visually using the OntoViz canvas, or import OWL/RDFS/industry standards (FIBO, CDISC, IOF, HL7 FHIR R4/R4B/R5)
 2. **Map** ontology entities to Databricks tables with column-level precision
 3. **Build** the Digital Twin — materializes triples into the triple store (incremental by default)
 4. **Query** through the GraphQL playground or explore the interactive knowledge graph
@@ -219,14 +219,32 @@ The **Ontology Designer** view (**Ontology → Designer**) includes a floating A
 
 OntoBricks exposes the knowledge graph to LLM agents via the [Model Context Protocol](https://modelcontextprotocol.io/). Deploy the companion `mcp-ontobricks` app and connect from Cursor, Claude Desktop, or the Databricks Playground.
 
+### Registry OBX Export / Import (UI)
+
+Export one or more domains directly from **Registry → Browse** to a portable
+`.obx` file with per-domain version-mode selection (Latest / Active / All /
+Choose). Import with per-domain conflict resolution (Skip / Overwrite / Rename).
+No command line required — ideal for ad-hoc transfers and cross-tenant sharing.
+
 ### Registry Import / Export (CLI)
 
-Promote domains between Databricks environments with the
+For automated promotion pipelines use the
 `scripts/registry_transfer.sh` command-line tool — export a curated subset
 of domains/versions from a source registry into a `.zip`, then preview and
-commit it into the target registry. No UI, no HTTP endpoint. See
-[Registry Import / Export (CLI)](docs/import-export.md) for the full
-reference and examples.
+commit it into the target registry. See
+[Registry Import / Export](docs/import-export.md) for the full reference,
+examples, and a comparison of the OBX UI vs CLI approaches.
+
+### Ontology Pitfalls Detector
+
+Detect 19 structural, logical, and semantic pitfalls (P1.1–P4.7) in your
+ontology from the **Ontology → Pitfalls** sidebar panel. Fast graph-only
+checks run immediately; ML-heavy checks (semantic similarity, NLP naming)
+require installing the optional extra:
+
+```bash
+uv sync --extra pitfalls
+```
 
 ### Documentation
 

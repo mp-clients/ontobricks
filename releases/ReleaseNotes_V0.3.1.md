@@ -1,7 +1,7 @@
 # OntoBricks — Release Notes V3.3.1
 
 **Release window:** May 2026
-**Type:** Hotfix
+**Type:** HotFix  
 **Test status:** 141 cohort tests passed, 0 failed (49 `test_cohort_builder.py`, 31 `test_dtwin_cohort.py`, 34 `test_cohort_models.py`, 24 `test_agent_cohort_tools.py`, 3 `test_agent_cohort_engine.py`).
 
 ---
@@ -57,11 +57,13 @@ Property dropdowns in the Path "where" filter and the Compatibility section prev
 
 ## Modified files
 
-| File | Change |
-|------|--------|
-| `src/back/core/graph_analysis/CohortBuilder.py` | Predicate normalisation fixes + alias map |
-| `src/front/static/query/js/query-cohorts.js` | Diagnostic guard + scoped attribute dropdowns |
-| `tests/test_cohort_builder.py` | 3 new regression tests |
+
+| File                                            | Change                                        |
+| ----------------------------------------------- | --------------------------------------------- |
+| `src/back/core/graph_analysis/CohortBuilder.py` | Predicate normalisation fixes + alias map     |
+| `src/front/static/query/js/query-cohorts.js`    | Diagnostic guard + scoped attribute dropdowns |
+| `tests/test_cohort_builder.py`                  | 3 new regression tests                        |
+
 
 ---
 

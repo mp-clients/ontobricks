@@ -11,7 +11,7 @@ OntoBricks is a **Knowledge Graph Builder** for the Databricks platform. It lets
 | Topic | File | What you'll find |
 |-------|------|------------------|
 | **Get Started** | [get-started.md](get-started.md) | Install, first run, Databricks setup, environment variables |
-| **User Guide** | [user-guide.md](user-guide.md) | Day-to-day usage — domain cockpit & versions (MCP-active vs loaded), ontology **Designer**, data mapping, triple-store pipeline, quality checks, reasoning, import (OWL, FIBO, CDISC, IOF) |
+| **User Guide** | [user-guide.md](user-guide.md) | Day-to-day usage — domain cockpit & versions (MCP-active vs loaded), ontology **Designer**, data mapping, triple-store pipeline, quality checks, reasoning, import (OWL, FIBO, CDISC, IOF, FHIR), Pitfalls Detector, Registry OBX export/import |
 | **Examples** | [examples.md](examples.md) | Family-tree and customer-journey walkthroughs you can follow along |
 | **Deployment** | [deployment.md](deployment.md) | Local dev, Databricks Apps, `app.yaml` resources, Unity Catalog grants for the app SP, in-app permissions, MCP deploy |
 | **Architecture** | [architecture.md](architecture.md) | System design, semantic web standards, agents, OntoViz, triple-store backends, reasoning engine |
@@ -20,6 +20,10 @@ OntoBricks is a **Knowledge Graph Builder** for the Databricks platform. It lets
 | **MCP** | [mcp.md](mcp.md) | MCP server, Databricks Playground integration, client configuration |
 | **Development** | [development.md](development.md) | Dependencies, test suite, permission / SDK notes |
 | **Code Map** | [code_organization.md](code_organization.md) | UI routes & templates, API surfaces, agents, MCP wiring |
+| **Lakebase GraphDB** | [lakebase-graphdb.md](lakebase-graphdb.md) | Lakebase setup, write modes, Postgres schema layout, permissions bootstrap, troubleshooting |
+| **GraphDB Integration** | [graphdb-integration.md](graphdb-integration.md) | Deep-dive: UC schema layout, resolver design, synced-table pipeline steps |
+| **Cohort Discovery** | [cohort_discovery.md](cohort_discovery.md) | Cohort rule builder, path traversal, predicate namespace handling |
+| **Import / Export** | [import-export.md](import-export.md) | Registry OBX UI (browser) + CLI `registry_transfer.sh` (CI/CD) |
 | **Product** | [product.md](product.md) | Value proposition, slide-ready material, competitive landscape |
 
 ---
