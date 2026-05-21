@@ -10,6 +10,7 @@ from typing import Any, Dict
 import requests
 
 from back.core.logging import get_logger
+from shared.config.constants import HTTP_USER_AGENT
 
 logger = get_logger(__name__)
 
@@ -43,11 +44,12 @@ def call_llm_with_retry(
     (5 s, 10 s, 20 s, 40 s, 60 s, 60 s) capped at ``_RATE_LIMIT_MAX_DELAY``.
     If the response includes a ``Retry-After`` header its value is used instead.
     """
+    request_headers = {"User-Agent": HTTP_USER_AGENT, **headers}
     last_exc = None
     for attempt in range(1, _RATE_LIMIT_RETRIES + 1):
         try:
             t0 = time.time()
-            resp = requests.post(url, json=payload, headers=headers, timeout=timeout)
+            resp = requests.post(url, json=payload, headers=request_headers, timeout=timeout)
             elapsed_ms = int((time.time() - t0) * 1000)
             logger.info(
                 "LLM: status=%d, %d bytes in %dms (attempt %d/%d)",

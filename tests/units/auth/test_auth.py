@@ -5,6 +5,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 from back.core.errors import ValidationError
+from shared.config.constants import HTTP_USER_AGENT
 from back.core.databricks import (
     DatabricksAuth,
     get_workspace_host,
@@ -159,6 +160,7 @@ class TestGetAuthHeaders:
         assert headers == {
             "Authorization": "Bearer my-pat",
             "Content-Type": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
         }
 
     @patch.object(DatabricksAuth, "get_oauth_token", return_value="oauth-header-token")
@@ -175,13 +177,14 @@ class TestGetAuthHeaders:
         assert headers == {
             "Authorization": "Bearer oauth-header-token",
             "Content-Type": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
         }
         mock_oauth.assert_called()
 
     def test_no_auth_empty_dict(self, monkeypatch):
         _clear_databricks_env(monkeypatch)
         auth = DatabricksAuth(host="https://ws.databricks.com", token="")
-        assert auth.get_auth_headers() == {}
+        assert auth.get_auth_headers() == {"User-Agent": HTTP_USER_AGENT}
 
 
 class TestGetSqlConnectionParams:

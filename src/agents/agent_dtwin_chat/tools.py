@@ -31,6 +31,7 @@ from typing import Callable, Dict, List
 import httpx
 
 from agents.tools.context import ToolContext
+from shared.config.constants import HTTP_USER_AGENT
 from agents.tools.graph_formatting import (
     format_find_response,
     format_graphql_response,
@@ -67,7 +68,7 @@ def _client(ctx: ToolContext) -> httpx.Client:
     return httpx.Client(
         base_url=ctx.dtwin_base_url or "http://localhost:8000",
         cookies=ctx.dtwin_session_cookies or {},
-        headers=ctx.dtwin_session_headers or {},
+        headers={"User-Agent": HTTP_USER_AGENT, **(ctx.dtwin_session_headers or {})},
         timeout=_HTTP_TIMEOUT,
         follow_redirects=False,
     )

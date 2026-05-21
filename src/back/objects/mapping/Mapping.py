@@ -15,6 +15,7 @@ from shared.config.constants import (
     AUTO_ASSIGN_CHUNK_COOLDOWN,
     AUTO_ASSIGN_CHUNK_SIZE,
     DEFAULT_BASE_URI,
+    HTTP_USER_AGENT,
 )
 from back.core.databricks import VolumeFileService
 from back.core.logging import get_logger
@@ -737,7 +738,7 @@ class Mapping:
         host_url = host.rstrip("/")
         if not host_url.startswith("http"):
             host_url = f"https://{host_url}"
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {token}", "User-Agent": HTTP_USER_AGENT}
         try:
             resp = requests.get(
                 f"{host_url}/api/2.0/fs/directories{base_path}",

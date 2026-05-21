@@ -44,7 +44,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends
 
-from shared.config.constants import APP_VERSION
+from shared.config.constants import APP_VERSION, HTTP_USER_AGENT
 from shared.config.settings import Settings, get_settings
 
 from back.core.helpers import run_blocking
@@ -599,6 +599,7 @@ def _check_lakebase_accelerated_sync(settings: Optional[Settings] = None) -> Tup
     headers = {
         "Authorization": f"Bearer {auth.get_bearer_token()}",
         "Accept": "application/json",
+        "User-Agent": HTTP_USER_AGENT,
     }
     try:
         resp = _requests.get(url, headers=headers, params={"limit": "1"}, timeout=10)

@@ -47,6 +47,8 @@ from fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)
 
+_USER_AGENT = "OntoBricks-MCP/1.0.0"
+
 # Cached M2M OAuth token (module-level to survive across _get_auth_headers calls)
 _oauth_cache: dict = {"token": "", "ts": 0.0}
 _OAUTH_TOKEN_TTL = 3000  # refresh well before the typical 3600 s expiry
@@ -364,7 +366,7 @@ def _get_auth_headers(mode: str) -> dict:
                 h = f"https://{h}"
             token_url = f"{h}/oidc/v1/token"
             logger.info("Requesting M2M OAuth token from %s", token_url)
-            with httpx.Client(timeout=10) as c:
+            with httpx.Client(timeout=10, headers={"User-Agent": _USER_AGENT}) as c:
                 resp = c.post(
                     token_url,
                     data={"grant_type": "client_credentials", "scope": "all-apis"},
@@ -501,7 +503,7 @@ def create_mcp_server(mode: str = "standalone") -> FastMCP:
 
     def _client() -> httpx.AsyncClient:
         """Create an httpx client with base URL and auth headers."""
-        headers = _get_auth_headers(mode)
+        headers = {"User-Agent": _USER_AGENT, **_get_auth_headers(mode)}
         return httpx.AsyncClient(base_url=base, headers=headers)
 
     async def _ensure_registry() -> dict:

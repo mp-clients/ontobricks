@@ -37,6 +37,7 @@ from back.core.errors import (
     ValidationError,
 )
 from back.core.logging import get_logger
+from shared.config.constants import HTTP_USER_AGENT
 
 
 def _raise_if_cancelled(
@@ -231,7 +232,11 @@ class _RestDatabaseAPI:
         if host and not host.startswith(("http://", "https://")):
             host = "https://" + host
         token = os.environ.get("DATABRICKS_TOKEN") or ""
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "User-Agent": HTTP_USER_AGENT,
+        }
         body = kwargs.get("body")
         resp = requests.request(
             method,

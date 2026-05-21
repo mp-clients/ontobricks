@@ -16,6 +16,7 @@ from .constants import (
     _OAUTH_TOKEN_TTL,
     _SQL_SOCKET_TIMEOUT,
 )
+from shared.config.constants import HTTP_USER_AGENT
 
 logger = get_logger(__name__)
 _CLOUD_FETCH_PROBE_TTL_SECONDS = 300
@@ -160,6 +161,7 @@ class DatabricksAuth:
                 token_url,
                 data={"grant_type": "client_credentials", "scope": "all-apis"},
                 auth=(self.client_id, self.client_secret),
+                headers={"User-Agent": HTTP_USER_AGENT},
                 timeout=5,
             )
             response.raise_for_status()
@@ -181,13 +183,15 @@ class DatabricksAuth:
             return {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
+                "User-Agent": HTTP_USER_AGENT,
             }
         if self.token:
             return {
                 "Authorization": f"Bearer {self.token}",
                 "Content-Type": "application/json",
+                "User-Agent": HTTP_USER_AGENT,
             }
-        return {}
+        return {"User-Agent": HTTP_USER_AGENT}
 
     def get_sql_connection_params(self) -> dict:
         """Return kwargs suitable for ``databricks.sql.connect()``.

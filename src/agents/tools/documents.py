@@ -11,6 +11,7 @@ import requests
 
 from back.core.logging import get_logger
 from agents.tools.context import ToolContext
+from shared.config.constants import HTTP_USER_AGENT
 
 logger = get_logger(__name__)
 
@@ -19,7 +20,7 @@ _MAX_DOC_CHARS = 80_000  # Increased to allow more context for mapping decisions
 
 
 def _headers(ctx: ToolContext) -> dict:
-    return {"Authorization": f"Bearer {ctx.token}"}
+    return {"Authorization": f"Bearer {ctx.token}", "User-Agent": HTTP_USER_AGENT}
 
 
 def _volume_docs_path(ctx: ToolContext) -> Optional[str]:

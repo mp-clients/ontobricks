@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 from back.core.logging import get_logger
 from .constants import _REQUEST_TIMEOUT, FS_FILES_PATH, FS_DIRS_PATH
 from .DatabricksAuth import DatabricksAuth
+from shared.config.constants import HTTP_USER_AGENT
 
 logger = get_logger(__name__)
 
@@ -42,7 +43,10 @@ class VolumeFileService:
         self._session = requests.Session()
 
     def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self._auth.get_bearer_token()}"}
+        return {
+            "Authorization": f"Bearer {self._auth.get_bearer_token()}",
+            "User-Agent": HTTP_USER_AGENT,
+        }
 
     def _host(self) -> str:
         return self._auth.host
