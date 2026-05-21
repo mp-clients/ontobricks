@@ -47,20 +47,33 @@ DATABRICKS_SQL_WAREHOUSE_ID=test-warehouse
 ```
 tests/e2e/
 ├── conftest.py          — server fixture, browser fixture, page fixture
+├── api/                 — external REST API v1 contracts (/api/v1/*)
 ├── navigation/          — top-level routing, home page, about, URI resolve
 ├── settings/            — settings page UI + write / mutation API contracts
-├── mapping/             — mapping page sidebar navigation
-├── domain/              — domain page sidebar navigation
-├── dtwin/               — digital twin sidebar (basic + full section parity)
+├── home/                — internal home/session/validation JSON API
+├── mapping/             — mapping sidebar navigation + mapping API contracts
+├── domain/              — domain sidebar navigation + domain API contracts
+├── dtwin/               — digital twin sidebar + sync/SPARQL API contracts
 ├── registry/            — registry page smoke tests
 ├── help/                — help center modal + /api/help/docs endpoint
 ├── security/            — CSRF enforcement, permission middleware, access-denied
-└── ontology/            — ontology feature (sidebar + CRUD + import + OWL export)
+└── ontology/            — ontology feature (sidebar + CRUD + import + OWL export + axioms)
 ```
 
 ---
 
 ## Sub-suites
+
+### `api/` — 16 tests
+
+| File | Class | What it tests |
+|---|---|---|
+| `test_external_api_flows.py` | `TestApiV1Health` | `GET /api/v1/health` → 200, JSON, has `status` field |
+| | `TestApiV1DomainsList` | `POST /api/v1/domains/list` → mounted, JSON, no 5xx |
+| | `TestApiV1DomainEndpoints` | `POST /api/v1/domain/{info,ontology,classes,properties,mappings,r2rml}` — route contracts |
+| | `TestApiV1Query` | `POST /api/v1/query/validate` valid + invalid SPARQL; `POST /api/v1/query/samples` |
+
+---
 
 ### `navigation/` — 15 tests
 
@@ -147,13 +160,15 @@ Deep tests for the Ontology feature.
 
 | Sub-suite | Tests |
 |---|---|
+| `api/` | 16 |
 | `navigation/` | 15 |
 | `settings/` | 8 |
-| `mapping/` | 6 |
-| `domain/` | 6 |
-| `dtwin/` | 9 |
+| `home/` | 12 |
+| `mapping/` | 18 |
+| `domain/` | 23 |
+| `dtwin/` | 25 |
 | `registry/` | 4 |
 | `help/` | 8 |
 | `security/` | 9 |
-| `ontology/` | 102 |
-| **Total** | **170** |
+| `ontology/` | 119 |
+| **Total** | **257** |
