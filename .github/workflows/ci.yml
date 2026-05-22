@@ -146,3 +146,29 @@ jobs:
         run: |
           cd docs/sphinx
           uv run make html || echo "Sphinx build completed with warnings"
+
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync --dev
+
+      - name: Audit Python dependencies (pip-audit)
+        run: |
+          uv run pip-audit --requirement requirements.txt --strict \
+            --output pip-audit-results.json --format json || true
+          uv run pip-audit --requirement requirements.txt --strict

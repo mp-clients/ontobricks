@@ -57,6 +57,7 @@ dev = [
     "playwright>=1.40.0",
     "sphinx>=7.0.0",
     "myst-parser>=3.0.0",
+    "pip-audit>=2.7.0",
 ]
 
 [tool.hatch.build.targets.wheel]
