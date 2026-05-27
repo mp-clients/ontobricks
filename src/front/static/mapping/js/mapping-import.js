@@ -3,36 +3,26 @@
  * Import section for the Mapping page - R2RML file import (local + Unity Catalog)
  */
 
-// --- R2RML Import: Local file ---
-document.getElementById('importR2rmlLocalBtn')?.addEventListener('click', function() {
-    document.getElementById('importR2rmlFileInput')?.click();
-});
-
-// --- R2RML Import: Unity Catalog ---
-document.getElementById('importR2rmlUCBtn')?.addEventListener('click', function() {
-    UCFileDialog.open({
-        mode: 'load',
-        title: 'Import R2RML from Unity Catalog',
-        extensions: ['.ttl', '.rdf'],
-        onSelect: async function(fileInfo) {
-            await importR2rmlContent(fileInfo.content, fileInfo.filename);
-        }
+document.addEventListener('DOMContentLoaded', function() {
+    // --- R2RML Import: Local file ---
+    document.getElementById('importR2rmlLocalBtn')?.addEventListener('click', function() {
+        document.getElementById('importR2rmlFileInput')?.click();
     });
-});
 
-// --- R2RML Import: file input change handler ---
-document.getElementById('importR2rmlFileInput')?.addEventListener('change', async function(e) {
-    const file = e.target.files[0];
-    if (!file) return;
+    // --- R2RML Import: file input change handler ---
+    document.getElementById('importR2rmlFileInput')?.addEventListener('change', async function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
 
-    try {
-        showNotification('Importing R2RML file...', 'info', 2000);
-        const content = await file.text();
-        await importR2rmlContent(content, file.name);
-    } catch (error) {
-        showNotification('Error reading file: ' + error.message, 'error');
-    }
-    this.value = '';
+        try {
+            showNotification('Importing R2RML file...', 'info', 2000);
+            const content = await file.text();
+            await importR2rmlContent(content, file.name);
+        } catch (error) {
+            showNotification('Error reading file: ' + error.message, 'error');
+        }
+        this.value = '';
+    });
 });
 
 /**

@@ -138,9 +138,7 @@ body:is(.read-only-version, .role-viewer) #docFileInput,
 body:is(.read-only-version, .role-viewer) #docFileList button[onclick*="deleteFile"],
 /* --- Ontology > Import: every "import from …" trigger + module checkboxes. */
 body:is(.read-only-version, .role-viewer) #importOwlLocalBtn,
-body:is(.read-only-version, .role-viewer) #importOwlUCBtn,
 body:is(.read-only-version, .role-viewer) #importRdfsLocalBtn,
-body:is(.read-only-version, .role-viewer) #importRdfsUCBtn,
 body:is(.read-only-version, .role-viewer) #importFiboBtn,
 body:is(.read-only-version, .role-viewer) #importCdiscBtn,
 body:is(.read-only-version, .role-viewer) #importIofBtn,
@@ -151,7 +149,6 @@ body:is(.read-only-version, .role-viewer) .cdisc-domain-cb,
 body:is(.read-only-version, .role-viewer) .iof-domain-cb,
 /* --- Mapping > Import: R2RML imports. */
 body:is(.read-only-version, .role-viewer) #importR2rmlLocalBtn,
-body:is(.read-only-version, .role-viewer) #importR2rmlUCBtn,
 body:is(.read-only-version, .role-viewer) #importR2rmlFileInput,
 /* --- Mapping > Designer / Manual: reset, auto-map, save. */
 body:is(.read-only-version, .role-viewer) #resetPanelBtn,

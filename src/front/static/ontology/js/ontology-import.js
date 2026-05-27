@@ -6,20 +6,11 @@
 // IMPORT SECTION - Import OWL, RDFS, FIBO, CDISC, IOF, FHIR
 // ===========================================================
 
+document.addEventListener('DOMContentLoaded', function() {
+
 // --- OWL Import ---
 document.getElementById('importOwlLocalBtn').addEventListener('click', function() {
     document.getElementById('importOwlFileInput').click();
-});
-
-document.getElementById('importOwlUCBtn').addEventListener('click', function() {
-    UCFileDialog.open({
-        mode: 'load',
-        title: 'Import OWL from Unity Catalog',
-        extensions: ['.ttl', '.owl', '.rdf'],
-        onSelect: async function(fileInfo) {
-            await parseAndLoadOwlFromProject(fileInfo.content, fileInfo.filename);
-        }
-    });
 });
 
 document.getElementById('importOwlFileInput').addEventListener('change', async function(e) {
@@ -70,17 +61,6 @@ async function parseAndLoadOwlFromProject(content, filename) {
 // --- RDFS Import ---
 document.getElementById('importRdfsLocalBtn').addEventListener('click', function() {
     document.getElementById('importRdfsFileInput').click();
-});
-
-document.getElementById('importRdfsUCBtn').addEventListener('click', function() {
-    UCFileDialog.open({
-        mode: 'load',
-        title: 'Import RDFS from Unity Catalog',
-        extensions: ['.ttl', '.rdf', '.xml', '.rdfs', '.n3', '.nt'],
-        onSelect: async function(fileInfo) {
-            await parseAndLoadRdfsFromProject(fileInfo.content, fileInfo.filename);
-        }
-    });
 });
 
 document.getElementById('importRdfsFileInput').addEventListener('change', async function(e) {
@@ -440,3 +420,4 @@ document.getElementById('importIofBtn').addEventListener('click', async function
     }
 });
 
+}); // DOMContentLoaded
