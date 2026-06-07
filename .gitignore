@@ -77,3 +77,6 @@ src/.coding_rules.md
 # Cookie jars / curl session dumps (may contain live session + CSRF tokens)
 cookies*.txt
 *.cookiejar
+
+# graphify knowledge graph — generated, regenerable via /graphify (10MB+ graph.json)
+graphify-out/

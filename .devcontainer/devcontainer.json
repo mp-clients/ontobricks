@@ -1,0 +1,35 @@
+{
+  "name": "ontobricks",
+  "image": "mcr.microsoft.com/devcontainers/python:3.12",
+
+  "features": {
+    "ghcr.io/devcontainers/features/common-utils:2": {},
+    "ghcr.io/devcontainers/features/git:1": {},
+    // Node — the base python image ships none, but the Claude Code CLI is an npm
+    // global install, so it's required for `/graphify` to be runnable in here.
+    "ghcr.io/devcontainers/features/node:1": {},
+    // GitHub CLI (`gh`) — always include it. Provides gh auth/PR/issue and is the
+    // supported way to authenticate git pushes to GitHub from inside the container.
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+
+  "remoteUser": "vscode",
+
+  // uv tools (graphify) and pipx shims land in ~/.local/bin; keep it on PATH so the
+  // graphify skill can invoke the `graphify` CLI.
+  "remoteEnv": {
+    "PATH": "/home/vscode/.local/bin:${containerEnv:PATH}"
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  // Persist logins across rebuilds: log in once, the named volumes keep the
+  // credentials (~/.claude/.credentials.json for Claude Code; ~/.config/gh/hosts.yml
+  // for the GitHub CLI). post-create.sh chowns them to the container user (fresh
+  // volumes mount root-owned). The volume names are shared on purpose — reuse
+  // "claude-code-config" and "gh-config" in other projects to share one login each.
+  "mounts": [
+    "source=claude-code-config,target=/home/vscode/.claude,type=volume",
+    "source=gh-config,target=/home/vscode/.config/gh,type=volume"
+  ]
+}
