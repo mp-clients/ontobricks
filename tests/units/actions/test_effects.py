@@ -13,8 +13,8 @@ def test_runner_marks_done_on_success():
     runner = EffectRunner(connect=lambda: conn.ctx(),
                           effects={"noop_log": NoopLogEffect()})
     runner.run_pending()
-    sql = " ".join(cur.executed).lower().replace(" ", "")
-    assert "done" in sql
+    flat = " ".join(str(p) for p in cur.params)
+    assert "done" in flat.lower()
 
 
 def test_runner_marks_failed_when_effect_raises():
@@ -25,4 +25,5 @@ def test_runner_marks_failed_when_effect_raises():
     conn = FakeConn(); conn.cursor_obj = cur
     runner = EffectRunner(connect=lambda: conn.ctx(), effects={"boom": Boom()})
     runner.run_pending()
-    assert "failed" in " ".join(cur.executed).lower()
+    flat = " ".join(str(p) for p in cur.params)
+    assert "failed" in flat.lower()
