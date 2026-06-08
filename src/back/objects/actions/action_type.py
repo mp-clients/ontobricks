@@ -16,6 +16,9 @@ class ActionType(ABC):
     object_type: str
     approval_policy: ApprovalPolicy
     params_model: Type[BaseModel]
+    # Property names this Action writes on `object_type`, exposed as
+    # overlay-backed read-back fields on the GraphQL type. Default empty.
+    overlay_fields: List[str] = []
 
     @abstractmethod
     def validate(self, ctx: ActionContext, params: BaseModel) -> List[str]:
