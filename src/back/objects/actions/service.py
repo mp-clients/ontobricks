@@ -48,6 +48,7 @@ class ActionService:
         if errors:
             return ActionResult(None, "FAILED", errors)
 
+        applied = False
         with self._connect() as conn:
             with conn.transaction():
                 cur = conn.cursor()
@@ -58,7 +59,10 @@ class ActionService:
                     actor_kind=ctx.actor_kind)
                 if atype.approval_policy == ApprovalPolicy.AUTO:
                     self._apply(cur, atype, aid, object_id, params, ctx)
-                    return ActionResult(aid, "APPLIED")
+                    applied = True
+        if applied:
+            self._drain_effects()
+            return ActionResult(aid, "APPLIED")
         return ActionResult(aid, "PROPOSED")
 
     def approve(self, action_id: uuid.UUID, approver: str, ctx: ActionContext) -> ActionResult:
@@ -74,6 +78,7 @@ class ActionService:
                 params = atype.params_model(**rec["params"])
                 self._audit.mark(cur, action_id, "APPROVED", approved_by=approver)
                 self._apply(cur, atype, action_id, rec["object_id"], params, ctx)
+        self._drain_effects()
         return ActionResult(action_id, "APPLIED")
 
     def reject(self, action_id: uuid.UUID, approver: str) -> ActionResult:
@@ -103,6 +108,20 @@ class ActionService:
                 parent_action_id=action_id)
             self._audit.mark(cur, child, "REVERTED")
         return ActionResult(action_id, "REVERTED")
+
+    def _drain_effects(self) -> None:
+        """Fire pending effects after commit. Best-effort; never raises into
+        the caller (effect failures are isolated in the outbox)."""
+        try:
+            from back.core.task_manager import run_background_task
+            from back.objects.actions.effects import EffectRunner, NoopLogEffect
+
+            def _run(connect):
+                EffectRunner(connect, {"noop_log": NoopLogEffect()}).run_pending()
+
+            run_background_task("drain-effects", "effects", _run, self._connect)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("effect drain could not be scheduled: %s", exc)
 
     def _apply(self, cur: Any, atype, action_id: uuid.UUID, object_id: str,
                params, ctx: ActionContext) -> None:

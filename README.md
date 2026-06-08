@@ -219,6 +219,18 @@ The **Ontology Designer** view (**Ontology → Designer**) includes a floating A
 
 OntoBricks exposes the knowledge graph to LLM agents via the [Model Context Protocol](https://modelcontextprotocol.io/). Deploy the companion `mcp-ontobricks` app and connect from Cursor, Claude Desktop, or the Databricks Playground.
 
+### Kinetic Actions
+
+The **Kinetic Action Layer** (`src/back/objects/actions/`) provides a typed, audited mutation path for all domain-object state changes (risk flags, approvals, status transitions). Nothing writes to the overlay outside this layer.
+
+**Action Types** are code-registered descriptors that declare a Pydantic params model, validation rules, overlay edits, and outbound effects. The seam is designed so that type definitions move to ontology-managed records in a future slice — domain experts will configure them without a code deploy. Today `flag_customer_high_risk` ships as the proof-of-seam.
+
+**ActionService** is the single mutation path: validate → lifecycle (AUTO applies immediately; REQUIRES_APPROVAL stays PROPOSED) → overlay upsert + audit record + effect rows in one Lakebase transaction → post-commit `EffectRunner` drain in a background task (best-effort, failures isolated to the outbox row).
+
+**Overlay** (`ontology_overlay`, Lakebase Postgres) is the authoritative store for kinetic state. The Triple Store materialises it on next build. **`action_log`** is immutable/append-only; every transition is recorded. The **Effect outbox** (`action_effects_outbox`) decouples effect delivery — only `NoopLogEffect` (log the payload) is live; real connectors (Delta sync, SAP, webhook) implement `Effect.run(payload)` and register under a string key.
+
+**Entry points**: GraphQL mutation `flagCustomerHighRisk` (added to the Mutation type when Lakebase is available), an MLflow-compatible agent tool (`agent_tool.py`), and a `actionLog` query resolver for read-back. See [Architecture — Kinetic Actions](docs/architecture.md#kinetic-actions) and the design spec under `docs/superpowers/`.
+
 ### Registry OBX Export / Import (UI)
 
 Export one or more domains directly from **Registry → Browse** to a portable
