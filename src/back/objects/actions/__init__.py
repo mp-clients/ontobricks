@@ -9,7 +9,8 @@ without changing ActionService, the overlay, the audit log, or effects.
 from typing import Any, Callable
 from back.objects.actions.schema import ensure_schema
 from back.objects.actions.registry import default_registry
-from back.objects.actions.service import ActionService
+from back.objects.actions.service import ActionService, ActionError, ActionResult
+from back.objects.actions.base import ActionContext
 import back.objects.actions.types  # noqa: F401  (registers action types)
 
 _schema_ready = False
@@ -23,3 +24,6 @@ def build_action_service(connect: Callable[[], Any]) -> ActionService:
         ensure_schema(connect)
         _schema_ready = True
     return ActionService(registry=default_registry, connect=connect)
+
+
+__all__ = ["build_action_service", "ActionService", "ActionError", "ActionResult", "ActionContext"]

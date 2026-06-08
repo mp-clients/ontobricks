@@ -36,6 +36,7 @@ class EffectRunner:
         self._outbox = EffectOutbox()
 
     def run_pending(self) -> None:
+        """Claim and run all PENDING outbox effects; mark each DONE or FAILED."""
         with self._connect() as conn, conn.cursor() as cur:
             pending = self._outbox.claim_pending(cur)
             for row in pending:

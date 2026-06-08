@@ -11,6 +11,7 @@ class AuditLog:
                         object_type: str, object_id: str, params: dict,
                         actor: str, actor_kind: str,
                         parent_action_id: Optional[uuid.UUID] = None) -> uuid.UUID:
+        """Insert a new action_log row with status PROPOSED and return its UUID."""
         aid = uuid.uuid4()
         cur.execute(
             "INSERT INTO action_log (action_id, action_type, domain, object_type, "
@@ -25,6 +26,7 @@ class AuditLog:
     def mark(self, cur: Any, action_id: uuid.UUID, status: str, *,
              approved_by: Optional[str] = None, before: Optional[dict] = None,
              after: Optional[dict] = None) -> None:
+        """Transition an action_log row to *status*, optionally recording provenance."""
         cur.execute(
             "UPDATE action_log SET status=%s, approved_by=COALESCE(%s, approved_by), "
             "before=COALESCE(%s, before), after=COALESCE(%s, after), "
@@ -37,6 +39,7 @@ class AuditLog:
         )
 
     def get(self, cur: Any, action_id: uuid.UUID) -> Optional[dict]:
+        """Fetch a single action_log row by UUID, or None if not found."""
         cur.execute(
             "SELECT action_type, domain, object_type, object_id, params, status "
             "FROM action_log WHERE action_id=%s", (str(action_id),))
@@ -51,6 +54,7 @@ class EffectOutbox:
     """Pending external effects (seam; no live connector in this slice)."""
 
     def enqueue(self, cur: Any, action_id: uuid.UUID, name: str, payload: dict) -> None:
+        """Insert a PENDING outbox row for a named effect with its JSON payload."""
         cur.execute(
             "INSERT INTO action_effects_outbox "
             "(effect_id, action_id, effect_name, payload, status) "
@@ -59,6 +63,7 @@ class EffectOutbox:
         )
 
     def claim_pending(self, cur: Any, limit: int = 20) -> list[dict]:
+        """Return up to *limit* PENDING outbox rows ordered by next_attempt_at."""
         cur.execute(
             "SELECT effect_id, action_id, effect_name, payload FROM action_effects_outbox "
             "WHERE status='PENDING' AND next_attempt_at <= now() "
@@ -67,6 +72,7 @@ class EffectOutbox:
                  "payload": r[3]} for r in cur.fetchall()]
 
     def mark(self, cur: Any, effect_id: Any, status: str, error: Optional[str] = None) -> None:
+        """Update an outbox row's status and increment its attempt counter."""
         cur.execute(
             "UPDATE action_effects_outbox SET status=%s, attempts=attempts+1, "
             "last_error=%s WHERE effect_id=%s",

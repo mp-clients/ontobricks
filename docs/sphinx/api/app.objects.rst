@@ -20,3 +20,4 @@ Subpackages
    app.objects.digitaltwin
    app.objects.registry
    app.objects.session
+   app.objects.actions

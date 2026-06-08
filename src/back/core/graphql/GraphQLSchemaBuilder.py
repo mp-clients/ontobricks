@@ -67,6 +67,10 @@ class GraphQLSchemaBuilder:
         query-only schema as before (backward-compatible).
         """
         h = self._ontology_hash(ontology_classes, ontology_properties)
+        # Encode mutation availability so a query-only schema is never
+        # returned when mutations were requested (and vice-versa).
+        if service_factory is not None and ctx_factory is not None:
+            h = h + "-m"
 
         if domain_name and domain_name in self._cache:
             cached_schema, cached_hash, cached_meta = self._cache[domain_name]

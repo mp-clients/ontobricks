@@ -18,6 +18,7 @@ class OverlayStore:
         self.domain = domain
 
     def apply_edits(self, cur: Any, action_id: uuid.UUID, edits: List[OverlayEdit]) -> None:
+        """Supersede any active overlay rows and insert new ACTIVE rows for each edit."""
         for e in edits:
             cur.execute(
                 "UPDATE ontology_overlay SET status='SUPERSEDED', valid_to=now() "
@@ -35,6 +36,7 @@ class OverlayStore:
 
     def current_value(self, cur: Any, object_type: str, object_id: str,
                       prop: str) -> Optional[dict]:
+        """Return the current ACTIVE overlay value for a property, or None if absent."""
         cur.execute(
             "SELECT value FROM ontology_overlay "
             "WHERE domain=%s AND object_type=%s AND object_id=%s "
@@ -46,6 +48,7 @@ class OverlayStore:
         return row[0] if row else None
 
     def revert_action(self, cur: Any, action_id: uuid.UUID) -> None:
+        """Mark all ACTIVE overlay rows for the given action as REVERTED."""
         cur.execute(
             "UPDATE ontology_overlay SET status='REVERTED', valid_to=now() "
             "WHERE domain=%s AND action_id=%s AND status='ACTIVE'",

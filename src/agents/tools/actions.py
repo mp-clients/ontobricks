@@ -5,16 +5,15 @@ from typing import Callable, Dict, List
 from back.core.logging import get_logger
 from agents.tools.context import ToolContext
 from back.objects.actions.base import ActionContext
-from back.objects.actions.registry import default_registry
-import back.objects.actions.types  # noqa: F401  (registers action types)
 from back.objects.actions.service import ActionService, ActionError
 
 logger = get_logger(__name__)
 
 
 def _build_service(ctx: ToolContext) -> ActionService:
+    from back.objects.actions import build_action_service
     connect = ctx.metadata.get("lakebase_connect")
-    return ActionService(registry=default_registry, connect=connect)
+    return build_action_service(connect)
 
 
 def tool_propose_flag_customer_high_risk(ctx: ToolContext, *, customer_id: str = "",
