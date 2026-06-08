@@ -86,7 +86,9 @@ class ResolverFactory:
     def make_action_mutation_resolver(service_factory, type_id, ctx_factory):
         """Resolver for a strawberry Mutation field that proposes an action."""
 
-        def resolver(info, customer_id: str, severity: str, reason: str = ""):
+        def resolver(
+            info: Info, customer_id: str, severity: str, reason: str = ""
+        ) -> ActionMutationResult:
             svc = service_factory(info)
             action_ctx = ctx_factory(info, customer_id)
             res = svc.propose(

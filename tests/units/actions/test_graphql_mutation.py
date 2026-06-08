@@ -57,3 +57,29 @@ def test_mutation_resolver_calls_service():
     out = resolver(info=None, customer_id="C1", severity="high", reason="r")
     assert calls["type_id"] == "flag_customer_high_risk"
     assert out.status == "PROPOSED"
+
+
+def test_mutation_schema_builds_through_strawberry():
+    """Regression: the mutation resolver must be fully annotated (info + return
+    type) so strawberry can build the schema. A direct resolver call (above)
+    does NOT exercise this — only schema construction does, which is what the
+    real app does on every GraphQL request. Guards against
+    MissingArgumentsAnnotationsError / UnresolvedFieldTypeError."""
+    import strawberry
+    from back.core.graphql.GraphQLSchemaBuilder import GraphQLSchemaBuilder
+
+    mutation = GraphQLSchemaBuilder._build_mutation(
+        service_factory=lambda info: None,
+        ctx_factory=lambda info, oid: None,
+    )
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> str:
+            return "ok"
+
+    schema = strawberry.Schema(query=Query, mutation=mutation)
+    sdl = schema.as_str()
+    assert "flagCustomerHighRisk" in sdl
+    assert "ActionMutationResult" in sdl
