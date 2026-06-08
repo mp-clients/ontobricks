@@ -1426,7 +1426,7 @@ Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The 
 
 - **GraphQL mutation** — `flagCustomerHighRisk(objectId, severity, reason)` is added to the Mutation type when Lakebase is available (see `src/back/fastapi/graphql_routes.py`). The mutation returns `{actionId, status, errors}`.
 - **Agent tool** — `src/back/objects/actions/agent_tool.py` exposes an MLflow-compatible tool descriptor so LLM agents can propose actions directly.
-- **Read-back** — the `actionLog` query resolver lets callers inspect the current state of any action UUID.
+- **Read-back** — overlay-backed read-back fields are live. Each `ActionType` declares `overlay_fields: list[OverlayFieldSpec]`; the registry aggregates them via `overlay_fields_by_type()`; `GraphQLSchemaBuilder._add_overlay_fields` attaches a `JSON` scalar field per `(object_type, prop)` pair to the matching per-domain GraphQL object type (e.g. `Customer.riskFlag`). The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection. The `actionLog` query resolver lets callers inspect the current state of any action UUID.
 
 ### Spec and plan
 
@@ -1436,8 +1436,6 @@ Full design rationale and the 12-task implementation plan live under `docs/super
 
 The following items are tracked but not yet implemented:
 
-- **Attach overlay-backed `riskFlag` field onto the live Customer GraphQL type** — the overlay data exists; the field resolver needs to query `ontology_overlay` and merge it into the auto-generated type.
-- **Encode mutation-availability in the GraphQL schema cache key** — the schema is conditionally built; the cache must vary when Lakebase availability changes.
 - **Real Effect connectors** — Delta sync, SAP, and webhook effects; all implement `Effect.run(payload)` and register under a string key.
 - **Ontology-defined Action Types** — move type definitions from Python classes to Lakebase records so domain experts configure them without a code deploy.
 
