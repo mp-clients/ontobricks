@@ -56,6 +56,7 @@ class GraphQLSchemaBuilder:
         domain_name: str = "",
         service_factory=None,
         ctx_factory=None,
+        overlay_connect=None,
     ) -> Optional[Tuple[strawberry.Schema, SchemaMetadata]]:
         """Build (or return cached) a Strawberry Schema from ontology metadata.
 
@@ -65,12 +66,19 @@ class GraphQLSchemaBuilder:
         will include a ``Mutation`` type with action fields in addition to the
         standard query fields.  Callers that omit these kwargs get the same
         query-only schema as before (backward-compatible).
+
+        When *overlay_connect* is provided (a zero-arg callable returning a DB
+        connection), overlay-backed JSON fields declared by registered action
+        types are attached to the matching GraphQL object types before the
+        schema is frozen.
         """
         h = self._ontology_hash(ontology_classes, ontology_properties)
         # Encode mutation availability so a query-only schema is never
         # returned when mutations were requested (and vice-versa).
         if service_factory is not None and ctx_factory is not None:
             h = h + "-m"
+        if overlay_connect is not None:
+            h = h + "-o"
 
         if domain_name and domain_name in self._cache:
             cached_schema, cached_hash, cached_meta = self._cache[domain_name]
@@ -84,6 +92,8 @@ class GraphQLSchemaBuilder:
             base_uri,
             service_factory=service_factory,
             ctx_factory=ctx_factory,
+            overlay_connect=overlay_connect,
+            domain=domain_name,
         )
         if result and domain_name:
             schema, meta = result
@@ -207,6 +217,8 @@ class GraphQLSchemaBuilder:
         base_uri: str,
         service_factory=None,
         ctx_factory=None,
+        overlay_connect=None,
+        domain=None,
     ) -> Optional[Tuple[strawberry.Schema, SchemaMetadata]]:
         if not classes:
             logger.warning("No ontology classes — cannot build GraphQL schema")
@@ -223,6 +235,13 @@ class GraphQLSchemaBuilder:
 
         py_classes = self._create_python_classes(order, class_by_name, base_uri)
         self._add_relationship_annotations(py_classes, rel_by_domain)
+
+        if overlay_connect is not None and domain:
+            from back.objects.actions.registry import default_registry
+            import back.objects.actions.types  # noqa: F401  (ensure action types register)
+            overlay_map = default_registry.overlay_fields_by_type()
+            if overlay_map:
+                self._add_overlay_fields(py_classes, overlay_map, domain, overlay_connect)
 
         gql_types = self._apply_strawberry_types(order, py_classes)
         if not gql_types:
@@ -332,6 +351,38 @@ class GraphQLSchemaBuilder:
             ns: Dict[str, Any] = {"__annotations__": annots, **defaults}
             py_classes[name] = type(name, (), ns)
         return py_classes
+
+    @staticmethod
+    def _add_overlay_fields(py_classes, overlay_map, domain, connect):
+        """Attach overlay-backed JSON read-back fields to the plain Python
+        classes BEFORE they are frozen by _apply_strawberry_types. For each
+        object_type present in py_classes, add one strawberry.field per declared
+        overlay property, resolved from the Lakebase overlay store."""
+        import strawberry
+        from strawberry.scalars import JSON
+        from typing import Optional
+        from back.core.graphql.ResolverFactory import ResolverFactory
+        from back.objects.actions.overlay_store import OverlayStore
+
+        store = OverlayStore(domain)
+        for object_type, props in (overlay_map or {}).items():
+            cls = py_classes.get(object_type)
+            if cls is None:
+                continue
+            for prop in props:
+                if prop in cls.__annotations__:
+                    continue  # don't clobber an ontology-declared field
+                cls.__annotations__[prop] = Optional[JSON]
+                setattr(
+                    cls,
+                    prop,
+                    strawberry.field(
+                        resolver=ResolverFactory.make_overlay_field_resolver(
+                            store, connect, object_type, prop
+                        ),
+                        description=f"Overlay-backed kinetic field '{prop}' (current applied value, or null).",
+                    ),
+                )
 
     @staticmethod
     def _add_relationship_annotations(

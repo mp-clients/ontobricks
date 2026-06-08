@@ -3,6 +3,7 @@
 from typing import Callable, List, Optional
 
 import strawberry
+from strawberry.scalars import JSON
 from strawberry.types import Info
 
 from back.core.graphql.SchemaMetadata import SchemaMetadata
@@ -71,14 +72,24 @@ class ResolverFactory:
 
     @staticmethod
     def make_overlay_field_resolver(store, connect, object_type, prop):
-        """Resolver for an overlay-backed scalar field on an object type."""
+        """Resolver for an overlay-backed scalar field on an object type.
 
-        def resolver(root):
+        Returns the current overlay value (arbitrary JSON) for the object's id,
+        or None. Read failures are isolated to this field (logged, return None)
+        so one field never breaks the whole query."""
+
+        def resolver(root) -> Optional[JSON]:
             object_id = getattr(root, "id", None)
             if object_id is None:
                 return None
-            with connect() as conn, conn.cursor() as cur:
-                return store.current_value(cur, object_type, str(object_id), prop)
+            try:
+                with connect() as conn, conn.cursor() as cur:
+                    return store.current_value(cur, object_type, str(object_id), prop)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "overlay field %s.%s read failed: %s", object_type, prop, exc
+                )
+                return None
 
         return resolver
 

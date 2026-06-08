@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import Dict
+from typing import Dict, Set
 from back.objects.actions.action_type import ActionType
 
 
@@ -24,6 +24,15 @@ class ActionRegistry:
     def ids(self) -> list[str]:
         """Return a sorted list of all registered action type IDs."""
         return sorted(self._types)
+
+    def overlay_fields_by_type(self) -> Dict[str, Set[str]]:
+        """Map object_type -> set of overlay property names declared across all
+        registered action types (object types with no declared fields are omitted)."""
+        result: Dict[str, Set[str]] = {}
+        for t in self._types.values():
+            for prop in getattr(t, "overlay_fields", []) or []:
+                result.setdefault(t.object_type, set()).add(prop)
+        return result
 
 
 # Process-wide default registry. Action type modules register here on import.
