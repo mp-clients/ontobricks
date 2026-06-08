@@ -51,3 +51,48 @@ def test_approval_policy_stops_at_proposed():
 def test_unknown_type_raises():
     with pytest.raises(ActionError):
         _svc(FakeConn()).propose("nope", "C1", {"severity": "x"}, _ctx())
+
+
+def _row(status):
+    return ("approval_flag", "customers", "Customer", "C1", {"severity": "high"}, status)
+
+
+def test_approve_applies_proposed_action():
+    conn = FakeConn(rows=[_row("PROPOSED")])
+    res = _svc(conn).approve(uuid.uuid4(), "approver@x", _ctx())
+    assert res.status == "APPLIED"
+    sql = " ".join(conn.cursor_obj.executed).lower()
+    assert "insert into ontology_overlay" in sql
+    assert "insert into action_effects_outbox" in sql
+
+
+def test_approve_rejects_non_proposed():
+    conn = FakeConn(rows=[_row("APPLIED")])
+    with pytest.raises(ActionError):
+        _svc(conn).approve(uuid.uuid4(), "approver@x", _ctx())
+
+
+def test_reject_marks_proposed_rejected():
+    conn = FakeConn(rows=[_row("PROPOSED")])
+    res = _svc(conn).reject(uuid.uuid4(), "approver@x")
+    assert res.status == "REJECTED"
+    assert "rejected" in " ".join(str(p) for p in conn.cursor_obj.params).lower()
+
+
+def test_reject_guards_non_proposed():
+    conn = FakeConn(rows=[_row("APPLIED")])
+    with pytest.raises(ActionError):
+        _svc(conn).reject(uuid.uuid4(), "approver@x")
+
+
+def test_revert_only_applied_raises_otherwise():
+    conn = FakeConn(rows=[_row("PROPOSED")])
+    with pytest.raises(ActionError):
+        _svc(conn).revert(uuid.uuid4(), _ctx())
+
+
+def test_revert_applied_action():
+    conn = FakeConn(rows=[_row("APPLIED")])
+    res = _svc(conn).revert(uuid.uuid4(), _ctx())
+    assert res.status == "REVERTED"
+    assert "reverted" in " ".join(conn.cursor_obj.executed).lower()

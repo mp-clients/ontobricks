@@ -79,6 +79,11 @@ class ActionService:
     def reject(self, action_id: uuid.UUID, approver: str) -> ActionResult:
         with self._connect() as conn, conn.transaction():
             cur = conn.cursor()
+            rec = self._audit.get(cur, action_id)
+            if rec is None or rec["status"] != "PROPOSED":
+                raise ActionError(
+                    f"cannot reject action in status "
+                    f"{rec['status'] if rec else 'unknown'}")
             self._audit.mark(cur, action_id, "REJECTED", approved_by=approver)
         return ActionResult(action_id, "REJECTED")
 
