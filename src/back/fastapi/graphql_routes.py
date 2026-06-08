@@ -178,6 +178,7 @@ def _get_schema_and_context(domain, settings, *, request=None):
 
     service_factory = None
     ctx_factory = None
+    connect = None
 
     if request is not None:
         connect = _build_action_connect(settings)
@@ -213,6 +214,7 @@ def _get_schema_and_context(domain, settings, *, request=None):
         display_name,
         service_factory=service_factory,
         ctx_factory=ctx_factory,
+        overlay_connect=connect,
     )
     if not result:
         raise ValidationError(
