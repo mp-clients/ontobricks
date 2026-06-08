@@ -1416,7 +1416,7 @@ Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The 
 
 ### Immutable action log
 
-`action_log` is append-only. Every state transition (PROPOSED → APPROVED/APPLIED/REJECTED/REVERTED) is a new `UPDATE` to the `status` column; the original row is preserved. `AuditLog.get` returns the current record; the log is exposed via the `actionLog` GraphQL query resolver.
+`action_log` is append-only. Every state transition (PROPOSED → APPROVED/APPLIED/REJECTED/REVERTED) is a new `UPDATE` to the `status` column; the original row is preserved. `AuditLog.get` returns the current record. (A GraphQL query resolver to expose the log is a future follow-up; not yet wired.)
 
 ### Effect outbox
 
@@ -1424,9 +1424,9 @@ Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The 
 
 ### Entry points
 
-- **GraphQL mutation** — `flagCustomerHighRisk(objectId, severity, reason)` is added to the Mutation type when Lakebase is available (see `src/back/fastapi/graphql_routes.py`). The mutation returns `{actionId, status, errors}`.
-- **Agent tool** — `src/back/objects/actions/agent_tool.py` exposes an MLflow-compatible tool descriptor so LLM agents can propose actions directly.
-- **Read-back** — overlay-backed read-back fields are live. Each `ActionType` declares `overlay_fields: list[OverlayFieldSpec]`; the registry aggregates them via `overlay_fields_by_type()`; `GraphQLSchemaBuilder._add_overlay_fields` attaches a `JSON` scalar field per `(object_type, prop)` pair to the matching per-domain GraphQL object type (e.g. `Customer.riskFlag`). The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection. The `actionLog` query resolver lets callers inspect the current state of any action UUID.
+- **GraphQL mutation** — `flagCustomerHighRisk(customerId, severity, reason)` is added to the Mutation type when Lakebase is available (see `src/back/fastapi/graphql_routes.py`). The mutation returns `{actionId, status, errors}`.
+- **Agent tool** — `src/agents/tools/actions.py` exposes `ACTION_TOOL_DEFINITIONS`/`ACTION_TOOL_HANDLERS` so LLM agents can propose actions directly.
+- **Read-back** — overlay-backed read-back fields are live. Each `ActionType` declares `overlay_fields: list[str]` (property names it writes on its `object_type`); `ActionRegistry.overlay_fields_by_type()` aggregates them into `dict[str, set[str]]`; `GraphQLSchemaBuilder._add_overlay_fields` attaches a `JSON` scalar field per declared `(object_type, prop)` to the matching per-domain GraphQL object type (e.g. `Customer.riskFlag`). The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection.
 
 ### Spec and plan
 
