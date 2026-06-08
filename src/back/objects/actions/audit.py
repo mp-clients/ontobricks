@@ -68,7 +68,7 @@ class EffectOutbox:
 
     def mark(self, cur: Any, effect_id: Any, status: str, error: Optional[str] = None) -> None:
         cur.execute(
-            "UPDATE action_effects_outbox SET status=%s, attempts=attempts+1, "
+            f"UPDATE action_effects_outbox SET status='{status}', attempts=attempts+1, "
             "last_error=%s WHERE effect_id=%s",
-            (status, error, str(effect_id)),
+            (error, str(effect_id)),
         )
