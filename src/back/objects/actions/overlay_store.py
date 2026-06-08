@@ -48,6 +48,6 @@ class OverlayStore:
     def revert_action(self, cur: Any, action_id: uuid.UUID) -> None:
         cur.execute(
             "UPDATE ontology_overlay SET status='REVERTED', valid_to=now() "
-            "WHERE action_id=%s AND status='ACTIVE'",
-            (str(action_id),),
+            "WHERE domain=%s AND action_id=%s AND status='ACTIVE'",
+            (self.domain, str(action_id)),
         )

@@ -26,3 +26,23 @@ def test_current_value_none_when_no_row():
     cur = FakeCursor(rows=[])
     store = OverlayStore(domain="customers")
     assert store.current_value(cur, "Customer", "C1", "riskFlag") is None
+
+
+def test_apply_edits_supersede_precedes_insert():
+    cur = FakeCursor()
+    OverlayStore("customers").apply_edits(
+        cur, uuid.uuid4(),
+        [OverlayEdit("Customer", "C1", "riskFlag", {"severity": "high"})])
+    assert "update" in cur.executed[0].lower()   # supersede first
+    assert "insert" in cur.executed[1].lower()   # then insert
+
+
+def test_revert_action_scopes_by_domain_and_action():
+    cur = FakeCursor()
+    aid = uuid.uuid4()
+    OverlayStore("customers").revert_action(cur, aid)
+    sql = cur.executed[-1].lower()
+    assert "reverted" in sql
+    assert "domain=%s" in sql and "action_id=%s" in sql
+    assert "status='active'" in sql.replace(" ", "")
+    assert cur.params[-1] == ("customers", str(aid))
