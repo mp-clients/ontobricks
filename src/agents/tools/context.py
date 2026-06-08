@@ -17,6 +17,7 @@ class ToolContext:
     host: str
     token: str
     metadata: dict = field(default_factory=dict)
+    actor: str = ""   # invoking principal (e.g. user email or "agent:<name>") — used by the kinetic action tools
 
     # OWL generator fields — registry-based document path
     registry: Optional[dict] = None

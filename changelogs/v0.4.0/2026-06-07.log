@@ -1,0 +1,127 @@
+## feat(actions): build_action_service factory + GraphQL route wiring + integration test
+
+### Context
+Task 11 of the kinetic-action-layer plan. Wires the previously-built
+`back.objects.actions` package into the running app so that:
+- `build_action_service` is a single importable entry-point that ensures the
+  kinetic Lakebase tables exist (once per process) and returns a ready
+  `ActionService`.
+- The GraphQL POST/GET routes optionally include a Mutation type (with
+  `flagCustomerHighRisk`) when Lakebase is available, using the shared
+  registry pool for the Lakebase connection.
+- An env-gated integration test validates the full propose→approve→read-back
+  loop against a live Lakebase instance.
+
+### Changes
+
+1. **`src/back/objects/actions/__init__.py`**
+   - Added `build_action_service(connect)` factory function with
+     process-wide `_schema_ready` guard.
+   - Imports `back.objects.actions.types` on module load to trigger
+     side-effect registration of action types in `default_registry`.
+
+2. **`src/back/fastapi/graphql_routes.py`**
+   - Added `_build_action_connect(settings)` helper that returns the
+     shared `_LakebasePool.connection` for the registry schema.
+   - Updated `_get_schema_and_context` to accept an optional `request`
+     kwarg; when provided and Lakebase is available it builds
+     `service_factory` and `ctx_factory` and passes them to
+     `_default_builder.build_for_domain(...)`.
+   - Actor email extracted from `request.state.user_email` (set by
+     `PermissionMiddleware`) falling back to `x-forwarded-email` header.
+   - Updated `graphql_playground` and `graphql_execute` route handlers
+     to pass `request=request`; `graphql_execute` gains a `request:
+     Request` parameter.
+   - `graphql_sdl` and `graphql_debug` stay query-only (no mutation).
+
+3. **`tests/units/actions/test_build_service.py`** *(new)*
+   - Unit test for `build_action_service`; resets `_schema_ready` flag
+     before each call to ensure DDL always runs.
+
+4. **`tests/integration/__init__.py`** *(new)*
+5. **`tests/integration/actions/__init__.py`** *(new)*
+6. **`tests/integration/actions/conftest.py`** *(new)*
+   - `test_connect` backed by `_get_pool(auth, schema, database).connection`
+     — same pool the registry store uses.
+7. **`tests/integration/actions/test_action_loop_lakebase.py`** *(new)*
+   - Full propose→approve→read-back integration test; skipped unless
+     `LAKEBASE_TEST_CONNECT=1` is set.
+
+### Modified files
+- `src/back/objects/actions/__init__.py`
+- `src/back/fastapi/graphql_routes.py`
+- `tests/units/actions/test_build_service.py` (new)
+- `tests/integration/__init__.py` (new)
+- `tests/integration/actions/__init__.py` (new)
+- `tests/integration/actions/conftest.py` (new)
+- `tests/integration/actions/test_action_loop_lakebase.py` (new)
+
+### Test results
+- `tests/units/actions/test_build_service.py` — 1 passed
+- `tests/integration/actions/` — 1 skipped (env gate working)
+- `tests/units -k "graphql or fastapi or route"` — 167 passed, 1 skipped
+- `tests/units` (full) — 2081 passed, 12 skipped, 2 pre-existing failures
+  in `test_external_api.py::TestDomainVersions` (registry not configured
+  in offline env — confirmed pre-existing, not introduced by this task)
+
+---
+
+## feat(actions): post-commit effect drain + docs + changelog
+
+### Context
+Task 12 (final) of the kinetic-action-layer plan. Completes the kinetic action
+layer by wiring `EffectRunner` as a post-commit background task so effects fire
+after the DB transaction has safely committed (never inside it). Adds the
+Kinetic Actions architecture section to both the Sphinx guide and the README,
+and writes this changelog entry.
+
+### Changes
+
+1. **`src/back/objects/actions/service.py`**
+   - Restructured `propose` so the AUTO branch sets `applied = True` inside
+     the transaction but does NOT return inside the `with` block; after the
+     block exits (transaction committed) the flag drives `_drain_effects()`
+     and the return value.
+   - `approve` now calls `self._drain_effects()` after the `with` block exits
+     (transaction committed), before returning `ActionResult`.
+   - Added `_drain_effects()` private helper: imports
+     `run_background_task` and `EffectRunner` lazily, schedules
+     `EffectRunner(connect, {"noop_log": NoopLogEffect()}).run_pending()`
+     in a background task. Catches all exceptions and logs a warning — never
+     raises into the caller.
+
+2. **`docs/architecture.md`**
+   - New "Kinetic Actions" section (inserted before "Extension Points")
+     covering: Action Types, ActionService single-mutation-path, Lakebase
+     overlay, immutable action log, Effect outbox, entry points (GraphQL
+     mutation, agent tool, read-back resolver), spec pointer, and
+     follow-up slices.
+
+3. **`docs/sphinx/guides/architecture.md`**
+   - Transitively includes the above via `{include}` directive — no
+     change needed.
+
+4. **`README.md`**
+   - New "Kinetic Actions" subsection (after "MCP Integration") with a
+     concise summary matching existing README style.
+
+### Modified files
+- `src/back/objects/actions/service.py`
+- `docs/architecture.md`
+- `README.md`
+
+### Test results
+- `tests/units/actions/` — **37 passed, 0 failed** (run twice; stable both
+  times — background drain is a harmless no-op against FakeConn because
+  `claim_pending` returns no rows).
+- Full suite (`uv run pytest -q`) — **2081 passed, 13 skipped, 2 FAILED**
+  (the 2 failures are PRE-EXISTING `test_external_api.py::TestDomainVersions`
+  — registry not configured in offline test env, present on master before
+  this branch, not introduced here). E2e errors are Playwright browser setup
+  (expected in offline dev env, unrelated to this work).
+
+### Follow-up slices (tracked, not yet implemented)
+- Attach overlay-backed `riskFlag` field onto the live Customer GraphQL type.
+- Encode mutation-availability in the GraphQL schema cache key.
+- Real Effect connectors (Delta sync, SAP, webhook).
+- Ontology-defined Action Types (move type definitions to Lakebase records).

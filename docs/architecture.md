@@ -1393,6 +1393,56 @@ See [API Documentation](api.md) for complete endpoint reference.
 
 ---
 
+## Kinetic Actions
+
+The **Kinetic Action Layer** (`src/back/objects/actions/`) is a typed, audited mutation path that sits between the GraphQL API and the authoritative Lakebase overlay. All writes that change domain object state (risk flags, status transitions, approvals) flow through this layer — nothing bypasses it.
+
+### Action Types
+
+Action Types are code-registered descriptors (class-level `id` + `object_type`) that declare their params model (Pydantic), validation rules, overlay edits, and outbound effects. Today one type ships — `flag_customer_high_risk` — as a proof-of-seam; the next slice moves type definitions from Python classes to ontology-managed records so domain experts can configure them without a code deploy.
+
+### ActionService — the single mutation path
+
+`ActionService.propose(type_id, object_id, params, ctx)` is the only way to mutate overlay state:
+
+1. **Validate** — registry lookup + Pydantic params parse + `ActionType.validate`.
+2. **Lifecycle** — if `ApprovalPolicy.AUTO` the action is immediately applied; if `REQUIRES_APPROVAL` it stays `PROPOSED` until an explicit `approve` call.
+3. **One transaction** — overlay upsert (`ontology_overlay`), audit record (`action_log`), and effect rows (`action_effects_outbox`) all commit atomically via the shared Lakebase connection.
+4. **Post-commit drain** — after the transaction exits, `_drain_effects()` schedules a background task (`task_manager.run_background_task`) that runs the `EffectRunner` against the outbox. Effect failures are isolated in the outbox row and never surface to the caller.
+
+### Authoritative Lakebase overlay
+
+Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The `OverlayStore` applies a list of `OverlayEdit` objects in a single upsert and supports `revert_action` (delete-by-action-id). The overlay is the system of record for kinetic state; the Triple Store materialises it on next build.
+
+### Immutable action log
+
+`action_log` is append-only. Every state transition (PROPOSED → APPROVED/APPLIED/REJECTED/REVERTED) is a new `UPDATE` to the `status` column; the original row is preserved. `AuditLog.get` returns the current record; the log is exposed via the `actionLog` GraphQL query resolver.
+
+### Effect outbox
+
+`action_effects_outbox` decouples effect delivery from the action transaction. `EffectRunner` claims pending rows, dispatches them to registered `Effect` handlers, and marks each `DONE` or `FAILED`. Only `NoopLogEffect` (logs the payload) is live today; real connectors (Delta sync, SAP, webhook) register under a string key with no changes to `ActionService`.
+
+### Entry points
+
+- **GraphQL mutation** — `flagCustomerHighRisk(objectId, severity, reason)` is added to the Mutation type when Lakebase is available (see `src/back/fastapi/graphql_routes.py`). The mutation returns `{actionId, status, errors}`.
+- **Agent tool** — `src/back/objects/actions/agent_tool.py` exposes an MLflow-compatible tool descriptor so LLM agents can propose actions directly.
+- **Read-back** — the `actionLog` query resolver lets callers inspect the current state of any action UUID.
+
+### Spec and plan
+
+Full design rationale and the 12-task implementation plan live under `docs/superpowers/specs/2026-06-08-kinetic-action-layer-design.md` and `docs/superpowers/plans/2026-06-08-kinetic-action-layer.md`.
+
+### Follow-up slices
+
+The following items are tracked but not yet implemented:
+
+- **Attach overlay-backed `riskFlag` field onto the live Customer GraphQL type** — the overlay data exists; the field resolver needs to query `ontology_overlay` and merge it into the auto-generated type.
+- **Encode mutation-availability in the GraphQL schema cache key** — the schema is conditionally built; the cache must vary when Lakebase availability changes.
+- **Real Effect connectors** — Delta sync, SAP, and webhook effects; all implement `Effect.run(payload)` and register under a string key.
+- **Ontology-defined Action Types** — move type definitions from Python classes to Lakebase records so domain experts configure them without a code deploy.
+
+---
+
 ## Extension Points
 
 1. **Additional Data Sources**: Implement new client classes in `src/back/core/databricks/`
