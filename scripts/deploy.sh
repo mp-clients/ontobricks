@@ -44,9 +44,19 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR/.."
 
 # ── 0. Load configuration ───────────────────────────────────────────
-CONFIG_FILE="scripts/deploy.config.sh"
+# `CLIENT=<name>` (env, or `make deploy CLIENT=<name>`) selects a per-client
+# config scripts/deploy.config.<name>.sh; unset uses the default sandbox config.
+# `CONFIG_FILE` may be set explicitly to override the path entirely.
+CONFIG_FILE="${CONFIG_FILE:-scripts/deploy.config.sh}"
+if [[ -n "${CLIENT:-}" ]]; then
+    CONFIG_FILE="scripts/deploy.config.${CLIENT}.sh"
+fi
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: $CONFIG_FILE not found." >&2
+    if [[ -n "${CLIENT:-}" ]]; then
+        echo "       CLIENT='${CLIENT}' expects $CONFIG_FILE — copy scripts/deploy.config.sh," >&2
+        echo "       edit it for the client, or unset CLIENT to use the sandbox config." >&2
+    fi
     exit 1
 fi
 # shellcheck disable=SC1090

@@ -9,7 +9,12 @@
 # do the same so `make bootstrap-perms` / `make bootstrap-lakebase`
 # stay aligned with the rest of the workflow.
 
-CONFIG := scripts/deploy.config.sh
+# Per-client deploy config. `CLIENT=<name>` selects scripts/deploy.config.<name>.sh
+# (e.g. `make deploy CLIENT=moneypool`); unset uses the default sandbox config.
+# Exported so scripts/deploy.sh (invoked by the deploy targets) selects the same one.
+CLIENT ?=
+export CLIENT
+CONFIG := scripts/deploy.config$(if $(strip $(CLIENT)),.$(strip $(CLIENT)),).sh
 
 .PHONY: help install test test-cov run dev prod setup format lint clean \
         deploy deploy-volume deploy-no-run \
@@ -34,9 +39,9 @@ help:
 	@echo "    make format       - Format code with black"
 	@echo "    make lint         - Lint code with flake8"
 	@echo ""
-	@echo "  Deployment (Databricks Asset Bundles — dev sandbox only):"
-	@echo "    Edit values in: $(CONFIG)"
-	@echo "    make deploy              - Deploy + start the dev sandbox app (Lakebase backend)"
+	@echo "  Deployment (Databricks Asset Bundles):"
+	@echo "    Active config: $(CONFIG)   (override with CLIENT=<name>, e.g. make deploy CLIENT=moneypool)"
+	@echo "    make deploy              - Deploy + start the app (Lakebase backend)"
 	@echo "    make deploy-volume       - Deploy + start the dev sandbox app (Volume-only backend)"
 	@echo "    make deploy-no-run       - Deploy without starting the app (Lakebase target)"
 	@echo "    make render-app-yaml     - Re-render app.yaml from template + config"
