@@ -135,9 +135,40 @@ def _load_domain_from_registry(domain_name, session_mgr, settings):
     return domain
 
 
-def _get_schema_and_context(domain, settings):
-    """Build (or retrieve cached) GraphQL schema and execution context."""
-    from back.core.graphql import build_schema_for_domain
+def _build_action_connect(settings):
+    """Return a Lakebase ``connect`` callable for the kinetic action layer.
+
+    Reuses the same process-wide ``_LakebasePool`` as ``LakebaseRegistryStore``
+    (keyed by auth + schema + database) so action DDL / overlay writes land in
+    the same Lakebase instance as the registry.
+
+    Returns ``None`` silently when Lakebase is not available (e.g. in local
+    dev without a Lakebase binding) so callers can degrade gracefully.
+    """
+    try:
+        from back.core.databricks import get_lakebase_auth
+        from back.objects.registry.store.lakebase.store import _get_pool
+
+        auth = get_lakebase_auth()
+        schema = getattr(settings, "lakebase_schema", None) or "ontobricks_registry"
+        database = getattr(settings, "lakebase_database", None) or ""
+        pool = _get_pool(auth, schema, database)
+        return pool.connection
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Lakebase not available for action layer: %s", exc)
+        return None
+
+
+def _get_schema_and_context(domain, settings, *, request=None):
+    """Build (or retrieve cached) GraphQL schema and execution context.
+
+    When *request* is provided and Lakebase is available, the schema is built
+    with ``service_factory`` and ``ctx_factory`` so that Mutation fields for
+    the kinetic action layer are included.  Without *request* (e.g. the debug
+    and SDL endpoints) or when Lakebase is unavailable the schema falls back to
+    query-only (backward-compatible).
+    """
+    from back.core.graphql import GraphQLSchemaBuilder
 
     ontology = domain.ontology or {}
     classes = ontology.get("classes", [])
@@ -145,7 +176,44 @@ def _get_schema_and_context(domain, settings):
     base_uri = ontology.get("base_uri", DEFAULT_BASE_URI)
     display_name = (domain.info or {}).get("name", "")
 
-    result = build_schema_for_domain(classes, properties_list, base_uri, display_name)
+    service_factory = None
+    ctx_factory = None
+
+    if request is not None:
+        connect = _build_action_connect(settings)
+        if connect is not None:
+            from back.objects.actions import build_action_service
+            from back.objects.actions.base import ActionContext
+
+            # Extract the current user email the same way other OntoBricks
+            # routes do: prefer the value set by PermissionMiddleware on
+            # request.state, fall back to the raw header.
+            actor_email = (
+                getattr(request.state, "user_email", "") or
+                request.headers.get("x-forwarded-email", "") or
+                "unknown"
+            )
+
+            service_factory = lambda info: build_action_service(connect)  # noqa: E731
+            ctx_factory = lambda info, object_id: ActionContext(  # noqa: E731
+                domain=display_name or "default",
+                actor=actor_email,
+                actor_kind="user",
+                connect=connect,
+            )
+
+    # Use the module-level singleton builder so the per-domain cache is shared
+    # across requests (same builder instance as build_schema_for_domain).
+    from back.core.graphql.GraphQLSchemaBuilder import _default_builder
+
+    result = _default_builder.build_for_domain(
+        classes,
+        properties_list,
+        base_uri,
+        display_name,
+        service_factory=service_factory,
+        ctx_factory=ctx_factory,
+    )
     if not result:
         raise ValidationError(
             "Could not generate GraphQL schema — ontology may be empty."
@@ -237,7 +305,7 @@ async def graphql_playground(
     settings: Settings = Depends(get_settings),
 ):
     domain = _load_domain_from_registry(domain_name, session_mgr, settings)
-    _get_schema_and_context(domain, settings)
+    _get_schema_and_context(domain, settings, request=request)
 
     display_name = (domain.info or {}).get("name", domain_name)
     api_prefix = (
@@ -255,13 +323,14 @@ async def graphql_playground(
     "The schema is auto-generated from the domain's ontology.",
 )
 async def graphql_execute(
+    request: Request,
     domain_name: str,
     body: GraphQLRequest,
     session_mgr: SessionManager = Depends(get_session_manager),
     settings: Settings = Depends(get_settings),
 ):
     domain = _load_domain_from_registry(domain_name, session_mgr, settings)
-    schema, context = _get_schema_and_context(domain, settings)
+    schema, context = _get_schema_and_context(domain, settings, request=request)
 
     if body.depth is not None:
         context["depth"] = min(max(body.depth, 1), MAX_DEPTH)
