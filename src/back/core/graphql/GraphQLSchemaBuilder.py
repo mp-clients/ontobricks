@@ -54,10 +54,17 @@ class GraphQLSchemaBuilder:
         ontology_properties: List[Dict],
         base_uri: str,
         domain_name: str = "",
+        service_factory=None,
+        ctx_factory=None,
     ) -> Optional[Tuple[strawberry.Schema, SchemaMetadata]]:
         """Build (or return cached) a Strawberry Schema from ontology metadata.
 
         Returns ``(schema, metadata)`` or ``None`` if the ontology is empty.
+
+        When both *service_factory* and *ctx_factory* are provided the schema
+        will include a ``Mutation`` type with action fields in addition to the
+        standard query fields.  Callers that omit these kwargs get the same
+        query-only schema as before (backward-compatible).
         """
         h = self._ontology_hash(ontology_classes, ontology_properties)
 
@@ -67,7 +74,13 @@ class GraphQLSchemaBuilder:
                 logger.debug("GraphQL schema cache hit for domain '%s'", domain_name)
                 return cached_schema, cached_meta
 
-        result = self._build(ontology_classes, ontology_properties, base_uri)
+        result = self._build(
+            ontology_classes,
+            ontology_properties,
+            base_uri,
+            service_factory=service_factory,
+            ctx_factory=ctx_factory,
+        )
         if result and domain_name:
             schema, meta = result
             self._cache[domain_name] = (schema, h, meta)
@@ -188,6 +201,8 @@ class GraphQLSchemaBuilder:
         classes: List[Dict],
         properties: List[Dict],
         base_uri: str,
+        service_factory=None,
+        ctx_factory=None,
     ) -> Optional[Tuple[strawberry.Schema, SchemaMetadata]]:
         if not classes:
             logger.warning("No ontology classes — cannot build GraphQL schema")
@@ -217,7 +232,13 @@ class GraphQLSchemaBuilder:
             rel_by_domain,
             base_uri,
         )
-        schema = self._build_query(order, gql_types, metadata)
+        schema = self._build_query(
+            order,
+            gql_types,
+            metadata,
+            service_factory=service_factory,
+            ctx_factory=ctx_factory,
+        )
         if not schema:
             return None
 
@@ -388,6 +409,8 @@ class GraphQLSchemaBuilder:
         order: List[str],
         gql_types: Dict[str, type],
         metadata: SchemaMetadata,
+        service_factory=None,
+        ctx_factory=None,
     ) -> Optional[strawberry.Schema]:
         query_fields = []
         for name in order:
@@ -419,7 +442,31 @@ class GraphQLSchemaBuilder:
             return None
 
         Query = create_type("Query", query_fields)
+        if service_factory is not None and ctx_factory is not None:
+            mutation = GraphQLSchemaBuilder._build_mutation(service_factory, ctx_factory)
+            return strawberry.Schema(query=Query, mutation=mutation)
         return strawberry.Schema(query=Query)
+
+    @staticmethod
+    def _build_mutation(service_factory, ctx_factory) -> type:
+        """Build a Strawberry Mutation type with action fields.
+
+        Currently exposes a single ``flagCustomerHighRisk`` field.  Additional
+        action fields can be appended to *mutation_fields* here as new action
+        types are registered.
+        """
+        mutation_fields = [
+            strawberry.field(
+                name="flagCustomerHighRisk",
+                resolver=ResolverFactory.make_action_mutation_resolver(
+                    service_factory=service_factory,
+                    type_id="flag_customer_high_risk",
+                    ctx_factory=ctx_factory,
+                ),
+                description="Propose flagging a customer high-risk (requires approval).",
+            )
+        ]
+        return create_type("Mutation", mutation_fields)
 
 
 # ------------------------------------------------------------------
