@@ -1,3 +1,5 @@
+import pytest
+from pydantic import ValidationError
 from back.objects.actions.base import ActionContext, ApprovalPolicy
 from back.objects.actions.types.review_withdrawal import (
     ReviewWithdrawal, ReviewWithdrawalParams,
@@ -48,8 +50,6 @@ def test_apply_override_flips_decision_and_marks_disagreement():
 
 
 def test_params_reject_bad_recommendation():
-    import pytest
-    from pydantic import ValidationError
     with pytest.raises(ValidationError):
         ReviewWithdrawalParams(withdrawal_id="W1", recommendation="maybe")
 

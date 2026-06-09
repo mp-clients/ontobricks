@@ -14,7 +14,7 @@ class ReviewWithdrawalParams(BaseModel):
     withdrawal_id: str
     recommendation: str = Field(pattern="^(approve|reject)$")
     rationale: str = ""
-    risk_assessment: Optional[dict] = None
+    risk_assessment: Optional[dict] = None  # agent's risk detail, preserved on the proposal (used by reviewWithdrawal resolver + slice-5 agent)
 
 
 class ReviewWithdrawal(ActionType):
@@ -29,6 +29,7 @@ class ReviewWithdrawal(ActionType):
     params_model = ReviewWithdrawalParams
 
     def validate(self, ctx: ActionContext, params: ReviewWithdrawalParams) -> List[str]:
+        # No propose-time preconditions yet; override-reason is enforced in ActionService.override.
         return []
 
     def apply(self, ctx: ActionContext, params: ReviewWithdrawalParams) -> List[OverlayEdit]:
@@ -43,8 +44,12 @@ class ReviewWithdrawal(ActionType):
             "reason": reason,
             "decided_at": _utcnow_iso(),
         }
-        return [OverlayEdit(object_type="Withdrawal", object_id=params.withdrawal_id,
-                            property="decision", value=value)]
+        return [OverlayEdit(
+            object_type="Withdrawal",
+            object_id=params.withdrawal_id,
+            property="decision",
+            value=value,
+        )]
 
     def effects(self, params: ReviewWithdrawalParams) -> List[Tuple[str, dict]]:
         # Slice 6 replaces noop_log with the moneypool main-app callback.
