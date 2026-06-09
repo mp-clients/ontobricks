@@ -16,7 +16,7 @@ def _build_service(ctx: ToolContext) -> ActionService:
     return build_action_service(connect)
 
 
-def tool_propose_review_withdrawal(ctx: ToolContext, *, withdrawal_id: str = "",
+def tool_propose_review_transaction(ctx: ToolContext, *, transaction_id: str = "",
                                    recommendation: str = "", rationale: str = "",
                                    risk_assessment: dict | None = None,
                                    **_kw) -> str:
@@ -26,8 +26,8 @@ def tool_propose_review_withdrawal(ctx: ToolContext, *, withdrawal_id: str = "",
         action_ctx = ActionContext(
             domain=ctx.domain_name or "fraud", actor=actor, actor_kind="agent",
             connect=ctx.metadata.get("lakebase_connect"))
-        res = svc.propose("review_withdrawal", withdrawal_id,
-                          {"withdrawal_id": withdrawal_id,
+        res = svc.propose("review_transaction", transaction_id,
+                          {"transaction_id": transaction_id,
                            "recommendation": recommendation,
                            "rationale": rationale,
                            "risk_assessment": risk_assessment},
@@ -42,23 +42,23 @@ def tool_propose_review_withdrawal(ctx: ToolContext, *, withdrawal_id: str = "",
 ACTION_TOOL_DEFINITIONS: List[dict] = [{
     "type": "function",
     "function": {
-        "name": "propose_review_withdrawal",
-        "description": ("Propose an approve/reject decision on a risky withdrawal. "
+        "name": "propose_review_transaction",
+        "description": ("Propose an approve/reject decision on a risky transaction. "
                         "Requires human approval (approveAction) or override (overrideAction) "
                         "before the decision is applied. Returns the action_id."),
         "parameters": {
             "type": "object",
             "properties": {
-                "withdrawal_id": {"type": "string", "description": "Withdrawal object id."},
+                "transaction_id": {"type": "string", "description": "Transaction object id."},
                 "recommendation": {"type": "string", "enum": ["approve", "reject"]},
                 "rationale": {"type": "string", "description": "Agent rationale for the recommendation."},
                 "risk_assessment": {"type": "object", "description": "Optional structured risk detail."},
             },
-            "required": ["withdrawal_id", "recommendation"],
+            "required": ["transaction_id", "recommendation"],
         },
     },
 }]
 
 ACTION_TOOL_HANDLERS: Dict[str, Callable] = {
-    "propose_review_withdrawal": tool_propose_review_withdrawal,
+    "propose_review_transaction": tool_propose_review_transaction,
 }

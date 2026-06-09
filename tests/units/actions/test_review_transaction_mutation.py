@@ -1,4 +1,4 @@
-"""Build-through-strawberry tests for reviewWithdrawal + overrideAction."""
+"""Build-through-strawberry tests for reviewTransaction + overrideAction."""
 import strawberry
 from back.core.graphql.ResolverFactory import ResolverFactory
 from back.objects.actions.service import ActionError
@@ -15,11 +15,11 @@ def test_review_resolver_proposes():
 
     class _Ctx: actor = "agent@x"
 
-    r = ResolverFactory.make_review_withdrawal_resolver(
+    r = ResolverFactory.make_review_transaction_resolver(
         service_factory=lambda info: _Svc(), ctx_factory=lambda info, oid: _Ctx())
-    out = r(info=None, withdrawal_id="W1", recommendation="reject", rationale="spike")
+    out = r(info=None, transaction_id="W1", recommendation="reject", rationale="spike")
     assert out.status == "PROPOSED"
-    assert seen["type_id"] == "review_withdrawal" and seen["object_id"] == "W1"
+    assert seen["type_id"] == "review_transaction" and seen["object_id"] == "W1"
     assert seen["params"]["recommendation"] == "reject"
 
 
@@ -67,7 +67,7 @@ def test_mutation_sdl_has_review_and_override():
         def ping(self) -> str: return "ok"
 
     sdl = strawberry.Schema(query=Query, mutation=mut).as_str()
-    assert "reviewWithdrawal" in sdl
+    assert "reviewTransaction" in sdl
     assert "overrideAction" in sdl
     # slice-3 governance fields remain
     assert "approveAction" in sdl and "rejectAction" in sdl

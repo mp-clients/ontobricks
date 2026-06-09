@@ -26,7 +26,7 @@ def test_overlay_field_resolver_reads_current_value():
             return False
 
     resolver = ResolverFactory.make_overlay_field_resolver(
-        store=_Store(), connect=lambda: _Conn(), object_type="Withdrawal", prop="decision"
+        store=_Store(), connect=lambda: _Conn(), object_type="Transaction", prop="decision"
     )
 
     class Obj:
@@ -55,7 +55,7 @@ def test_mutation_schema_builds_through_strawberry():
 
     schema = strawberry.Schema(query=Query, mutation=mutation)
     sdl = schema.as_str()
-    assert "reviewWithdrawal" in sdl
+    assert "reviewTransaction" in sdl
     assert "approveAction" in sdl
     assert "overrideAction" in sdl
     assert "ActionMutationResult" in sdl

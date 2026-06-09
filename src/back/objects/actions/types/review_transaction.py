@@ -10,29 +10,29 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-class ReviewWithdrawalParams(BaseModel):
-    withdrawal_id: str
+class ReviewTransactionParams(BaseModel):
+    transaction_id: str
     recommendation: str = Field(pattern="^(approve|reject)$")
     rationale: str = ""
-    risk_assessment: Optional[dict] = None  # agent's risk detail, preserved on the proposal (used by reviewWithdrawal resolver + slice-5 agent)
+    risk_assessment: Optional[dict] = None  # agent's risk detail, preserved on the proposal (used by reviewTransaction resolver + slice-5 agent)
 
 
-class ReviewWithdrawal(ActionType):
-    """An agent proposes a decision on a risky withdrawal; a human accepts
+class ReviewTransaction(ActionType):
+    """An agent proposes a decision on a risky transaction; a human accepts
     (approveAction) or overrides (overrideAction). The applied overlay records
     both the agent recommendation and the human decision."""
-    id = "review_withdrawal"
-    object_type = "Withdrawal"
+    id = "review_transaction"
+    object_type = "Transaction"
     overlay_fields = ["decision"]
     requires_separate_approver = True
     approval_policy = ApprovalPolicy.REQUIRES_APPROVAL
-    params_model = ReviewWithdrawalParams
+    params_model = ReviewTransactionParams
 
-    def validate(self, ctx: ActionContext, params: ReviewWithdrawalParams) -> List[str]:
+    def validate(self, ctx: ActionContext, params: ReviewTransactionParams) -> List[str]:
         # No propose-time preconditions yet; override-reason is enforced in ActionService.override.
         return []
 
-    def apply(self, ctx: ActionContext, params: ReviewWithdrawalParams) -> List[OverlayEdit]:
+    def apply(self, ctx: ActionContext, params: ReviewTransactionParams) -> List[OverlayEdit]:
         override = (ctx.metadata or {}).get("decision_override")
         human_decision = override or params.recommendation
         reason = (ctx.metadata or {}).get("override_reason", "")
@@ -45,12 +45,12 @@ class ReviewWithdrawal(ActionType):
             "decided_at": _utcnow_iso(),
         }
         return [OverlayEdit(
-            object_type="Withdrawal",
-            object_id=params.withdrawal_id,
+            object_type="Transaction",
+            object_id=params.transaction_id,
             property="decision",
             value=value,
         )]
 
-    def effects(self, params: ReviewWithdrawalParams) -> List[Tuple[str, dict]]:
+    def effects(self, params: ReviewTransactionParams) -> List[Tuple[str, dict]]:
         # Slice 6 replaces noop_log with the moneypool main-app callback.
-        return [("noop_log", {"withdrawal_id": params.withdrawal_id})]
+        return [("noop_log", {"transaction_id": params.transaction_id})]

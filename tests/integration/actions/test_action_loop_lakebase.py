@@ -24,9 +24,9 @@ def test_propose_approve_applies_and_reads_back():
         connect=test_connect,
     )
     r = svc.propose(
-        "review_withdrawal",
+        "review_transaction",
         wid,
-        {"withdrawal_id": wid, "recommendation": "reject", "rationale": "velocity spike"},
+        {"transaction_id": wid, "recommendation": "reject", "rationale": "velocity spike"},
         ctx,
     )
     assert r.status == "PROPOSED"
@@ -35,7 +35,7 @@ def test_propose_approve_applies_and_reads_back():
     with test_connect() as conn, conn.cursor() as cur:
         assert (
             OverlayStore("fraud").current_value(
-                cur, "Withdrawal", wid, "decision"
+                cur, "Transaction", wid, "decision"
             )["agent_recommendation"]
             == "reject"
         )

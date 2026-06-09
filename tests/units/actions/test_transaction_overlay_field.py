@@ -1,11 +1,11 @@
-"""The Withdrawal.decision overlay read-back field is attached when the
-fraud ontology has a Withdrawal class. Built through strawberry."""
-import back.objects.actions.types  # noqa: F401  (registers ReviewWithdrawal)
+"""The Transaction.decision overlay read-back field is attached when the
+fraud ontology has a Transaction class. Built through strawberry."""
+import back.objects.actions.types  # noqa: F401  (registers ReviewTransaction)
 from back.core.graphql.GraphQLSchemaBuilder import GraphQLSchemaBuilder
 
 
-def test_withdrawal_decision_field_present_in_sdl():
-    classes = [{"name": "Withdrawal", "uri": "http://ex/fraud/Withdrawal",
+def test_transaction_decision_field_present_in_sdl():
+    classes = [{"name": "Transaction", "uri": "http://ex/fraud/Transaction",
                 "dataProperties": [{"name": "amount", "uri": "http://ex/fraud/amount"}]}]
     props = []
     builder = GraphQLSchemaBuilder()
@@ -15,5 +15,5 @@ def test_withdrawal_decision_field_present_in_sdl():
     assert result is not None
     schema, _meta = result
     sdl = schema.as_str()
-    assert "type Withdrawal" in sdl
+    assert "type Transaction" in sdl
     assert "decision" in sdl          # overlay-backed JSON field

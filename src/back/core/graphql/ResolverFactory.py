@@ -130,20 +130,20 @@ class ResolverFactory:
         return rejectAction
 
     @staticmethod
-    def make_review_withdrawal_resolver(service_factory, ctx_factory):
-        """Mutation resolver: an agent proposes a withdrawal-review decision."""
+    def make_review_transaction_resolver(service_factory, ctx_factory):
+        """Mutation resolver: an agent proposes a transaction-review decision."""
 
-        def reviewWithdrawal(info: Info, withdrawal_id: str, recommendation: str,
+        def reviewTransaction(info: Info, transaction_id: str, recommendation: str,
                              rationale: str = "",
                              risk_assessment: Optional[JSON] = None) -> ActionMutationResult:
             svc = service_factory(info)
-            ctx = ctx_factory(info, withdrawal_id)
-            # purpose-built resolver for the reviewWithdrawal field; the action type id is fixed by design
+            ctx = ctx_factory(info, transaction_id)
+            # purpose-built resolver for the reviewTransaction field; the action type id is fixed by design
             res = svc.propose(
-                "review_withdrawal",
-                withdrawal_id,
+                "review_transaction",
+                transaction_id,
                 {
-                    "withdrawal_id": withdrawal_id,
+                    "transaction_id": transaction_id,
                     "recommendation": recommendation,
                     "rationale": rationale,
                     "risk_assessment": risk_assessment,
@@ -155,7 +155,7 @@ class ResolverFactory:
                 status=res.status,
                 errors=list(res.errors),
             )
-        return reviewWithdrawal
+        return reviewTransaction
 
     @staticmethod
     def make_override_resolver(service_factory, ctx_factory):

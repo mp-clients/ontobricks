@@ -506,7 +506,7 @@ class GraphQLSchemaBuilder:
     def _build_mutation(service_factory, ctx_factory) -> type:
         """Build a Strawberry Mutation type with action fields.
 
-        Exposes: ``approveAction``, ``rejectAction``, ``reviewWithdrawal``,
+        Exposes: ``approveAction``, ``rejectAction``, ``reviewTransaction``,
         ``overrideAction``.  Additional fields can be appended to
         *mutation_fields* here as new action types are registered.
         """
@@ -524,10 +524,10 @@ class GraphQLSchemaBuilder:
                 description="Reject a PROPOSED action with an optional reason.",
             ),
             strawberry.field(
-                name="reviewWithdrawal",
-                resolver=ResolverFactory.make_review_withdrawal_resolver(
+                name="reviewTransaction",
+                resolver=ResolverFactory.make_review_transaction_resolver(
                     service_factory=service_factory, ctx_factory=ctx_factory),
-                description="Agent proposes an approve/reject decision on a risky withdrawal.",
+                description="Agent proposes an approve/reject decision on a risky transaction.",
             ),
             strawberry.field(
                 name="overrideAction",

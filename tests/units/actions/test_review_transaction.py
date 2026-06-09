@@ -1,8 +1,8 @@
 import pytest
 from pydantic import ValidationError
 from back.objects.actions.base import ActionContext, ApprovalPolicy
-from back.objects.actions.types.review_withdrawal import (
-    ReviewWithdrawal, ReviewWithdrawalParams,
+from back.objects.actions.types.review_transaction import (
+    ReviewTransaction, ReviewTransactionParams,
 )
 
 
@@ -11,10 +11,10 @@ def _ctx(actor="reviewer@x", metadata=None):
                          connect=lambda: None, metadata=metadata or {})
 
 
-def test_type_declares_withdrawal_overlay_and_4eyes():
-    t = ReviewWithdrawal()
-    assert t.id == "review_withdrawal"
-    assert t.object_type == "Withdrawal"
+def test_type_declares_transaction_overlay_and_4eyes():
+    t = ReviewTransaction()
+    assert t.id == "review_transaction"
+    assert t.object_type == "Transaction"
     assert t.overlay_fields == ["decision"]
     assert t.requires_separate_approver is True
     assert t.approval_policy == ApprovalPolicy.REQUIRES_APPROVAL
@@ -22,13 +22,13 @@ def test_type_declares_withdrawal_overlay_and_4eyes():
 
 def test_apply_accept_composes_agreed_decision():
     # No override in metadata => accept: human_decision == agent_recommendation.
-    t = ReviewWithdrawal()
-    p = ReviewWithdrawalParams(withdrawal_id="W1", recommendation="reject",
+    t = ReviewTransaction()
+    p = ReviewTransactionParams(transaction_id="W1", recommendation="reject",
                                rationale="velocity spike")
     edits = t.apply(_ctx(actor="boss@x"), p)
     assert len(edits) == 1
     e = edits[0]
-    assert e.object_type == "Withdrawal" and e.object_id == "W1" and e.property == "decision"
+    assert e.object_type == "Transaction" and e.object_id == "W1" and e.property == "decision"
     assert e.value["agent_recommendation"] == "reject"
     assert e.value["human_decision"] == "reject"
     assert e.value["agreed"] is True
@@ -37,8 +37,8 @@ def test_apply_accept_composes_agreed_decision():
 
 
 def test_apply_override_flips_decision_and_marks_disagreement():
-    t = ReviewWithdrawal()
-    p = ReviewWithdrawalParams(withdrawal_id="W1", recommendation="reject",
+    t = ReviewTransaction()
+    p = ReviewTransactionParams(transaction_id="W1", recommendation="reject",
                                rationale="velocity spike")
     ctx = _ctx(actor="boss@x",
                metadata={"decision_override": "approve", "override_reason": "known customer"})
@@ -51,12 +51,12 @@ def test_apply_override_flips_decision_and_marks_disagreement():
 
 def test_params_reject_bad_recommendation():
     with pytest.raises(ValidationError):
-        ReviewWithdrawalParams(withdrawal_id="W1", recommendation="maybe")
+        ReviewTransactionParams(transaction_id="W1", recommendation="maybe")
 
 
 def test_effects_enqueue_noop_for_now():
-    t = ReviewWithdrawal()
-    p = ReviewWithdrawalParams(withdrawal_id="W1", recommendation="approve")
+    t = ReviewTransaction()
+    p = ReviewTransactionParams(transaction_id="W1", recommendation="approve")
     effects = t.effects(p)
     assert effects and effects[0][0] == "noop_log"
-    assert effects[0][1]["withdrawal_id"] == "W1"
+    assert effects[0][1]["transaction_id"] == "W1"

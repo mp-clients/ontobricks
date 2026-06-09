@@ -1399,7 +1399,7 @@ The **Kinetic Action Layer** (`src/back/objects/actions/`) is a typed, audited m
 
 ### Action Types
 
-Action Types are code-registered descriptors (class-level `id` + `object_type`) that declare their params model (Pydantic), validation rules, overlay edits, and outbound effects. The current shipping type is `review_withdrawal` — an agent proposes an approve/reject decision on a risky withdrawal; a human accepts or overrides it. A future slice will move type definitions from Python classes to Lakebase records so domain experts can configure them without a code deploy.
+Action Types are code-registered descriptors (class-level `id` + `object_type`) that declare their params model (Pydantic), validation rules, overlay edits, and outbound effects. The current shipping type is `review_transaction` — an agent proposes an approve/reject decision on a risky transaction; a human accepts or overrides it. A future slice will move type definitions from Python classes to Lakebase records so domain experts can configure them without a code deploy.
 
 ### ActionService — the single mutation path
 
@@ -1422,13 +1422,13 @@ Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The 
 
 `action_effects_outbox` decouples effect delivery from the action transaction. `EffectRunner` claims pending rows, dispatches them to registered `Effect` handlers, and marks each `DONE` or `FAILED`. Only `NoopLogEffect` (logs the payload) is live today; real connectors (Delta sync, SAP, webhook) register under a string key with no changes to `ActionService`.
 
-### Fraud withdrawal review loop
+### Fraud transaction review loop
 
-The current proof-of-seam is the **fraud withdrawal review** loop, driven by the `review_withdrawal` action type (`src/back/objects/actions/types/review_withdrawal.py`):
+The current proof-of-seam is the **fraud transaction review** loop, driven by the `review_transaction` action type (`src/back/objects/actions/types/review_transaction.py`). The object is modelled as a general `Transaction` — the review applies to any risky outbound movement; withdrawals are the first reviewed type, distinguished by the source table's `txn_type`/`direction` columns rather than by the ontology:
 
-- **`ReviewWithdrawal`** — `id="review_withdrawal"`, `object_type="Withdrawal"`, `overlay_fields=["decision"]`, `requires_separate_approver=True`, `approval_policy=REQUIRES_APPROVAL`.
-- **Params** — `withdrawal_id`, `recommendation` (`approve` | `reject`), `rationale` (string), `risk_assessment` (optional dict for structured risk detail).
-- **`apply()`** — writes a `decision` overlay value onto the Withdrawal object:
+- **`ReviewTransaction`** — `id="review_transaction"`, `object_type="Transaction"`, `overlay_fields=["decision"]`, `requires_separate_approver=True`, `approval_policy=REQUIRES_APPROVAL`.
+- **Params** — `transaction_id`, `recommendation` (`approve` | `reject`), `rationale` (string), `risk_assessment` (optional dict for structured risk detail).
+- **`apply()`** — writes a `decision` overlay value onto the Transaction object:
   ```json
   {
     "agent_recommendation": "approve" | "reject",
@@ -1440,7 +1440,7 @@ The current proof-of-seam is the **fraud withdrawal review** loop, driven by the
   }
   ```
   When the human accepts the agent's recommendation (`approveAction`), `agreed` is `true` and `reason` is empty. When the human overrides (`overrideAction`), `agreed` is `false` and `reason` carries the required justification.
-- **Effect** — currently `noop_log` (logs the withdrawal id). The real moneypool main-app API write-back is deferred to a later slice.
+- **Effect** — currently `noop_log` (logs the transaction id). The real moneypool main-app API write-back is deferred to a later slice.
 - **Fraud agent** — the real risk-scoring agent (computes `recommendation` + `risk_assessment` from transaction data) is also deferred to a later slice. Today the agent tool lets a human or test harness propose the decision directly.
 
 ### ActionStatus
@@ -1459,12 +1459,12 @@ The current proof-of-seam is the **fraud withdrawal review** loop, driven by the
 ### Entry points
 
 - **GraphQL mutations** — the Mutation type (added when Lakebase is available; see `src/back/fastapi/graphql_routes.py`) exposes four fields, all returning `{actionId, status, errors}`:
-  - `reviewWithdrawal(withdrawalId, recommendation, rationale, riskAssessment)` — agent (or test harness) proposes an approve/reject decision on a withdrawal. Resolver: `ResolverFactory.make_review_withdrawal_resolver`. Always proposes with `action_type="review_withdrawal"`.
+  - `reviewTransaction(transactionId, recommendation, rationale, riskAssessment)` — agent (or test harness) proposes an approve/reject decision on a transaction. Resolver: `ResolverFactory.make_review_transaction_resolver`. Always proposes with `action_type="review_transaction"`.
   - `approveAction(actionId)` — approve a PROPOSED action; the approver is the current request user (`ctx.actor`). **4-eyes is enforced**: `ActionService.approve` raises an `ActionError` if the approver equals the original proposer. Resolver: `ResolverFactory.make_approve_resolver`.
   - `rejectAction(actionId, reason)` — reject a PROPOSED action; the optional `reason` is recorded in the audit row. Resolver: `ResolverFactory.make_reject_resolver`.
   - `overrideAction(actionId, decision, reason)` — human overrides the agent's recommendation with their own `decision` and a mandatory `reason`. Marks the action `OVERRIDDEN` and writes the `decision` overlay in the same transaction. Resolver: `ResolverFactory.make_override_resolver`. **Approver role-gating (RBAC) is a deferred follow-up.**
-- **Agent tool** — `src/agents/tools/actions.py` exposes the MCP tool `propose_review_withdrawal` (`ACTION_TOOL_DEFINITIONS` / `ACTION_TOOL_HANDLERS`) so LLM agents can propose withdrawal-review decisions directly.
-- **Read-back** — `Withdrawal.decision` is a live overlay-backed `JSON` scalar field. Each `ActionType` declares `overlay_fields: list[str]`; `ActionRegistry.overlay_fields_by_type()` aggregates them; `GraphQLSchemaBuilder._add_overlay_fields` attaches the resolver before the schema is frozen. The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection.
+- **Agent tool** — `src/agents/tools/actions.py` exposes the MCP tool `propose_review_transaction` (`ACTION_TOOL_DEFINITIONS` / `ACTION_TOOL_HANDLERS`) so LLM agents can propose transaction-review decisions directly.
+- **Read-back** — `Transaction.decision` is a live overlay-backed `JSON` scalar field. Each `ActionType` declares `overlay_fields: list[str]`; `ActionRegistry.overlay_fields_by_type()` aggregates them; `GraphQLSchemaBuilder._add_overlay_fields` attaches the resolver before the schema is frozen. The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection.
 
 ### Spec and plan
 
@@ -1474,7 +1474,7 @@ Full design rationale and the implementation plan live under `docs/superpowers/s
 
 The following items are tracked but not yet implemented:
 
-- **Moneypool main-app write-back** — replace `noop_log` with an HTTP callback to the moneypool main-app API after a withdrawal decision is applied or overridden.
+- **Moneypool main-app write-back** — replace `noop_log` with an HTTP callback to the moneypool main-app API after a transaction decision is applied or overridden.
 - **Real fraud agent** — the risk-scoring agent that computes `recommendation` + `risk_assessment` from transaction data.
 - **Approver RBAC** — role-gate `approveAction` / `overrideAction` so only users with the appropriate permission level can act.
 - **Real Effect connectors** — Delta sync, SAP, and webhook effects; all implement `Effect.run(payload)` and register under a string key.

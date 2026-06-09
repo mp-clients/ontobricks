@@ -1,0 +1,46 @@
+## Fraud review object generalised: Withdrawal → Transaction (slice 4 follow-up)
+
+### Context
+Before merging slice 4, the core fraud-review object was generalised from
+`Withdrawal` to `Transaction`. Rationale: moneypool's source data is a general
+transactions ledger, the fraud signals (amount, velocity, device, geo) are
+transaction-level, and future fraud surfaces (transfers, card payments) extend
+by data instead of an ontology re-model. Withdrawals remain the first reviewed
+type, distinguished by `txn_type`/`direction` columns on the source table.
+Pure rename — no behavioral change; same suite results as slice 4.
+
+### Changes
+1. `src/back/objects/actions/types/review_transaction.py` (renamed from
+   `review_withdrawal.py`) — `ReviewTransaction`/`ReviewTransactionParams`,
+   `id="review_transaction"`, `object_type="Transaction"`, param
+   `transaction_id`. Decision overlay value shape unchanged.
+2. `src/back/core/graphql/ResolverFactory.py` — `make_review_transaction_resolver`,
+   inner resolver/mutation field `reviewTransaction(transactionId, ...)`.
+3. `src/back/core/graphql/GraphQLSchemaBuilder.py` — Mutation field renamed
+   `reviewWithdrawal` → `reviewTransaction`.
+4. `src/agents/tools/actions.py` — agent MCP tool `propose_review_transaction`.
+5. `scripts/seed_fraud_transactions.sql` (renamed from
+   `seed_fraud_withdrawals.sql`) — table `fraud_transactions`; added
+   `txn_type` + `direction` columns; ids T1001–T1003.
+6. Tests renamed/re-pointed: `test_review_transaction.py`,
+   `test_review_transaction_mutation.py`, `test_transaction_overlay_field.py`
+   (+ transaction naming in the override/SoD/agent-tool/integration tests).
+7. Docs: `docs/architecture.md` (fraud loop now describes the general
+   `Transaction` object + withdrawals-first note), `README.md`,
+   `docs/sphinx/api/app.objects.actions.rst` (autodoc target), and an
+   update note at the top of the slice-4 design spec.
+
+### Modified / added / removed files
+- src/back/objects/actions/types/review_transaction.py (renamed + content)
+- src/back/core/graphql/ResolverFactory.py, GraphQLSchemaBuilder.py
+- src/agents/tools/actions.py
+- scripts/seed_fraud_transactions.sql (renamed + txn_type/direction)
+- tests/units/actions/* (renames + naming), tests/integration/actions/test_action_loop_lakebase.py
+- docs/architecture.md, README.md, docs/sphinx/api/app.objects.actions.rst
+- docs/superpowers/specs/2026-06-08-fraud-withdrawal-review-design.md (update note)
+
+### Test result
+- `uv run pytest tests/units` → 2153 passed, 11 skipped, 2 failed — identical
+  to slice 4 pre-rename; the 2 failures are the pre-existing unrelated
+  `test_external_api.py::TestDomainVersions` (registry-not-configured offline).
+  No new failures.

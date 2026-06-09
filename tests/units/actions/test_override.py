@@ -9,12 +9,12 @@ from tests.units.actions.fakes import FakeConn
 
 
 class _P(BaseModel):
-    withdrawal_id: str
+    transaction_id: str
     recommendation: str = Field(pattern="^(approve|reject)$")
 
 
 class _Review(ActionType):
-    id = "review_withdrawal"; object_type = "Withdrawal"
+    id = "review_transaction"; object_type = "Transaction"
     overlay_fields = ["decision"]
     requires_separate_approver = True
     approval_policy = ApprovalPolicy.REQUIRES_APPROVAL
@@ -23,12 +23,12 @@ class _Review(ActionType):
     def apply(self, ctx, p):
         override = (ctx.metadata or {}).get("decision_override")
         human = override or p.recommendation
-        return [OverlayEdit("Withdrawal", p.withdrawal_id, "decision",
+        return [OverlayEdit("Transaction", p.transaction_id, "decision",
                             {"agent_recommendation": p.recommendation,
                              "human_decision": human,
                              "agreed": human == p.recommendation,
                              "decided_by": ctx.actor})]
-    def effects(self, p): return [("noop_log", {"withdrawal_id": p.withdrawal_id})]
+    def effects(self, p): return [("noop_log", {"transaction_id": p.transaction_id})]
 
 
 def _svc(conn):
@@ -42,8 +42,8 @@ def _ctx():
 
 
 def _row(status, actor="agent@x"):
-    return ("review_withdrawal", "fraud", "Withdrawal", "W1",
-            {"withdrawal_id": "W1", "recommendation": "reject"}, status, actor)
+    return ("review_transaction", "fraud", "Transaction", "W1",
+            {"transaction_id": "W1", "recommendation": "reject"}, status, actor)
 
 
 def test_override_marks_overridden_and_writes_overlay():

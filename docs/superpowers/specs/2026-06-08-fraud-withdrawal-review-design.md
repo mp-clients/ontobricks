@@ -2,6 +2,14 @@
 
 **Date:** 2026-06-08
 **Status:** Approved (design); pending implementation plan
+
+> **Update 2026-06-09:** the core object was generalised from `Withdrawal` to
+> **`Transaction`** before merge (action `review_transaction`, mutation
+> `reviewTransaction`, overlay `Transaction.decision`, agent tool
+> `propose_review_transaction`). Withdrawals are the first reviewed type,
+> distinguished by `txn_type`/`direction` columns on the source table rather than
+> by the ontology. Everything below reads "withdrawal" as the original design
+> vocabulary; the shipped names use "transaction".
 **Branch base:** `mp/master` (kinetic slices 1–3 merged)
 **Builds on:** `docs/superpowers/specs/2026-06-08-kinetic-action-layer-design.md`,
 `docs/superpowers/specs/2026-06-08-kinetic-approve-reject-design.md`
