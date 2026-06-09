@@ -15,6 +15,7 @@ class FlagCustomerHighRisk(ActionType):
     id = "flag_customer_high_risk"
     object_type = "Customer"
     overlay_fields = ["riskFlag"]
+    requires_separate_approver = True
     approval_policy = ApprovalPolicy.REQUIRES_APPROVAL
     params_model = FlagHighRiskParams
 

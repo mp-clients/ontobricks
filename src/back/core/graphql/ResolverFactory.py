@@ -97,7 +97,7 @@ class ResolverFactory:
     def make_action_mutation_resolver(service_factory, type_id, ctx_factory):
         """Resolver for a strawberry Mutation field that proposes an action."""
 
-        def resolver(
+        def flagCustomerHighRisk(
             info: Info, customer_id: str, severity: str, reason: str = ""
         ) -> ActionMutationResult:
             svc = service_factory(info)
@@ -114,4 +114,40 @@ class ResolverFactory:
                 errors=list(res.errors),
             )
 
-        return resolver
+        return flagCustomerHighRisk
+
+    @staticmethod
+    def make_approve_resolver(service_factory, ctx_factory):
+        """Mutation resolver: approve a PROPOSED action (approver = current user)."""
+        from back.objects.actions.service import ActionError
+
+        def approveAction(info: Info, action_id: strawberry.ID) -> ActionMutationResult:
+            svc = service_factory(info)
+            ctx = ctx_factory(info, None)
+            try:
+                res = svc.approve(str(action_id), ctx.actor, ctx)
+                return ActionMutationResult(
+                    action_id=str(res.action_id) if res.action_id else None,
+                    status=res.status, errors=list(res.errors))
+            except ActionError as exc:
+                return ActionMutationResult(action_id=str(action_id), status="ERROR",
+                                            errors=[str(exc)])
+        return approveAction
+
+    @staticmethod
+    def make_reject_resolver(service_factory, ctx_factory):
+        """Mutation resolver: reject a PROPOSED action with an optional reason."""
+        from back.objects.actions.service import ActionError
+
+        def rejectAction(info: Info, action_id: strawberry.ID, reason: str = "") -> ActionMutationResult:
+            svc = service_factory(info)
+            ctx = ctx_factory(info, None)
+            try:
+                res = svc.reject(str(action_id), ctx.actor, reason)
+                return ActionMutationResult(
+                    action_id=str(res.action_id) if res.action_id else None,
+                    status=res.status, errors=list(res.errors))
+            except ActionError as exc:
+                return ActionMutationResult(action_id=str(action_id), status="ERROR",
+                                            errors=[str(exc)])
+        return rejectAction

@@ -1424,7 +1424,10 @@ Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The 
 
 ### Entry points
 
-- **GraphQL mutation** — `flagCustomerHighRisk(customerId, severity, reason)` is added to the Mutation type when Lakebase is available (see `src/back/fastapi/graphql_routes.py`). The mutation returns `{actionId, status, errors}`.
+- **GraphQL mutation** — the Mutation type (added when Lakebase is available; see `src/back/fastapi/graphql_routes.py`) now exposes three fields, all returning `{actionId, status, errors}`:
+  - `flagCustomerHighRisk(customerId, severity, reason)` — propose flagging a customer high-risk.
+  - `approveAction(actionId)` — approve a PROPOSED action; the approver is the current request user (`ctx.actor`). **4-eyes is enforced per `ActionType`**: when `ActionType.requires_separate_approver` is `True` (set on `FlagCustomerHighRisk`), `ActionService.approve` raises an `ActionError` if the approver equals the original proposer. The check lives in `src/back/objects/actions/service.py`; the resolver is `ResolverFactory.make_approve_resolver` in `src/back/core/graphql/ResolverFactory.py`. **Approver role-gating (RBAC) is a deferred follow-up** — current safety is the PROPOSED-state guard plus 4-eyes.
+  - `rejectAction(actionId, reason)` — reject a PROPOSED action; the optional `reason` string is recorded in the `action_log` audit row (`after.rejected_reason`). Resolver: `ResolverFactory.make_reject_resolver`.
 - **Agent tool** — `src/agents/tools/actions.py` exposes `ACTION_TOOL_DEFINITIONS`/`ACTION_TOOL_HANDLERS` so LLM agents can propose actions directly.
 - **Read-back** — overlay-backed read-back fields are live. Each `ActionType` declares `overlay_fields: list[str]` (property names it writes on its `object_type`); `ActionRegistry.overlay_fields_by_type()` aggregates them into `dict[str, set[str]]`; `GraphQLSchemaBuilder._add_overlay_fields` attaches a `JSON` scalar field per declared `(object_type, prop)` to the matching per-domain GraphQL object type (e.g. `Customer.riskFlag`). The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection.
 
