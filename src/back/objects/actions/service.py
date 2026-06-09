@@ -1,4 +1,5 @@
 from __future__ import annotations
+import dataclasses
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional
@@ -153,12 +154,16 @@ class ActionService:
                             f"cannot override action in status {rec['status']}")
                     atype = self._registry.get(rec["action_type"])
                     params = atype.params_model(**rec["params"])
-                    ctx.metadata = {**(ctx.metadata or {}),
-                                    "decision_override": decision,
-                                    "override_reason": reason}
-                    self._apply(cur, atype, action_id, rec["object_id"], params, ctx,
+                    # augmented copy (don't mutate the caller's ctx) so apply() composes the human decision
+                    override_ctx = dataclasses.replace(
+                        ctx,
+                        metadata={**(ctx.metadata or {}),
+                                  "decision_override": decision,
+                                  "override_reason": reason},
+                    )
+                    self._apply(cur, atype, action_id, rec["object_id"], params, override_ctx,
                                 status="OVERRIDDEN", approved_by=approver,
-                                extra_after={"override_decision": decision,
+                                extra_after={"decision_override": decision,
                                              "override_reason": reason})
         self._drain_effects()
         return ActionResult(action_id, "OVERRIDDEN")
