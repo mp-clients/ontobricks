@@ -519,7 +519,19 @@ class GraphQLSchemaBuilder:
                     ctx_factory=ctx_factory,
                 ),
                 description="Propose flagging a customer high-risk (requires approval).",
-            )
+            ),
+            strawberry.field(
+                name="approveAction",
+                resolver=ResolverFactory.make_approve_resolver(
+                    service_factory=service_factory, ctx_factory=ctx_factory),
+                description="Approve a PROPOSED action (4-eyes enforced per action type).",
+            ),
+            strawberry.field(
+                name="rejectAction",
+                resolver=ResolverFactory.make_reject_resolver(
+                    service_factory=service_factory, ctx_factory=ctx_factory),
+                description="Reject a PROPOSED action with an optional reason.",
+            ),
         ]
         return create_type("Mutation", mutation_fields)
 
