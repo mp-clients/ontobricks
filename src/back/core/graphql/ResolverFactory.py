@@ -94,29 +94,6 @@ class ResolverFactory:
         return resolver
 
     @staticmethod
-    def make_action_mutation_resolver(service_factory, type_id, ctx_factory):
-        """Resolver for a strawberry Mutation field that proposes an action."""
-
-        def flagCustomerHighRisk(
-            info: Info, customer_id: str, severity: str, reason: str = ""
-        ) -> ActionMutationResult:
-            svc = service_factory(info)
-            action_ctx = ctx_factory(info, customer_id)
-            res = svc.propose(
-                type_id,
-                customer_id,
-                {"customer_id": customer_id, "severity": severity, "reason": reason},
-                action_ctx,
-            )
-            return ActionMutationResult(
-                action_id=str(res.action_id) if res.action_id else None,
-                status=res.status,
-                errors=list(res.errors),
-            )
-
-        return flagCustomerHighRisk
-
-    @staticmethod
     def make_approve_resolver(service_factory, ctx_factory):
         """Mutation resolver: approve a PROPOSED action (approver = current user)."""
         from back.objects.actions.service import ActionError
@@ -151,3 +128,50 @@ class ResolverFactory:
                 return ActionMutationResult(action_id=str(action_id), status="ERROR",
                                             errors=[str(exc)])
         return rejectAction
+
+    @staticmethod
+    def make_review_transaction_resolver(service_factory, ctx_factory):
+        """Mutation resolver: an agent proposes a transaction-review decision."""
+
+        def reviewTransaction(info: Info, transaction_id: str, recommendation: str,
+                             rationale: str = "",
+                             risk_assessment: Optional[JSON] = None) -> ActionMutationResult:
+            svc = service_factory(info)
+            ctx = ctx_factory(info, transaction_id)
+            # purpose-built resolver for the reviewTransaction field; the action type id is fixed by design
+            res = svc.propose(
+                "review_transaction",
+                transaction_id,
+                {
+                    "transaction_id": transaction_id,
+                    "recommendation": recommendation,
+                    "rationale": rationale,
+                    "risk_assessment": risk_assessment,
+                },
+                ctx,
+            )
+            return ActionMutationResult(
+                action_id=str(res.action_id) if res.action_id else None,
+                status=res.status,
+                errors=list(res.errors),
+            )
+        return reviewTransaction
+
+    @staticmethod
+    def make_override_resolver(service_factory, ctx_factory):
+        """Mutation resolver: a human overrides a PROPOSED action with their own decision."""
+        from back.objects.actions.service import ActionError
+
+        def overrideAction(info: Info, action_id: strawberry.ID, decision: str,
+                           reason: str) -> ActionMutationResult:
+            svc = service_factory(info)
+            ctx = ctx_factory(info, None)
+            try:
+                res = svc.override(str(action_id), ctx.actor, decision, reason, ctx)
+                return ActionMutationResult(
+                    action_id=str(res.action_id) if res.action_id else None,
+                    status=res.status, errors=list(res.errors))
+            except ActionError as exc:
+                return ActionMutationResult(action_id=str(action_id), status="ERROR",
+                                            errors=[str(exc)])
+        return overrideAction

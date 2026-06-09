@@ -81,7 +81,7 @@ Built-in action types
    :undoc-members:
    :show-inheritance:
 
-.. automodule:: back.objects.actions.types.flag_customer_high_risk
+.. automodule:: back.objects.actions.types.review_transaction
    :members:
    :undoc-members:
    :show-inheritance:

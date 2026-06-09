@@ -1,4 +1,5 @@
 from __future__ import annotations
+import dataclasses
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, List, Optional
@@ -132,14 +133,54 @@ class ActionService:
         except Exception as exc:  # noqa: BLE001
             logger.warning("effect drain could not be scheduled: %s", exc)
 
+    def override(self, action_id: uuid.UUID, approver: str, decision: str,
+                 reason: str, ctx: ActionContext) -> ActionResult:
+        """Override a PROPOSED action's recommendation with the human's own
+        decision. Marks the agent proposal OVERRIDDEN and writes the human's
+        decision overlay in the same transaction (agent recommendation preserved
+        in the row's params)."""
+        if decision not in ("approve", "reject"):
+            raise ActionError("decision must be 'approve' or 'reject'")
+        if not reason or not reason.strip():
+            raise ActionError("override requires a reason")
+        with self._connect() as conn:
+            with conn.transaction():
+                with conn.cursor() as cur:
+                    rec = self._audit.get(cur, action_id)
+                    if rec is None:
+                        raise ActionError(f"unknown action: {action_id}")
+                    if rec["status"] != "PROPOSED":
+                        raise ActionError(
+                            f"cannot override action in status {rec['status']}")
+                    atype = self._registry.get(rec["action_type"])
+                    params = atype.params_model(**rec["params"])
+                    # augmented copy (don't mutate the caller's ctx) so apply() composes the human decision
+                    override_ctx = dataclasses.replace(
+                        ctx,
+                        metadata={**(ctx.metadata or {}),
+                                  "decision_override": decision,
+                                  "override_reason": reason},
+                    )
+                    self._apply(cur, atype, action_id, rec["object_id"], params, override_ctx,
+                                status="OVERRIDDEN", approved_by=approver,
+                                extra_after={"decision_override": decision,
+                                             "override_reason": reason})
+        self._drain_effects()
+        return ActionResult(action_id, "OVERRIDDEN")
+
     def _apply(self, cur: Any, atype, action_id: uuid.UUID, object_id: str,
-               params, ctx: ActionContext) -> None:
+               params, ctx: ActionContext, *, status: str = "APPLIED",
+               approved_by: Optional[str] = None,
+               extra_after: Optional[dict] = None) -> None:
         overlay = OverlayStore(domain=ctx.domain)
         edits = atype.apply(ctx, params)
         before = {e.property: overlay.current_value(cur, e.object_type, e.object_id, e.property)
                   for e in edits}
         overlay.apply_edits(cur, action_id, edits)
         after = {e.property: e.value for e in edits}
-        self._audit.mark(cur, action_id, "APPLIED", before=before, after=after)
+        if extra_after:
+            after = {**after, **extra_after}
+        self._audit.mark(cur, action_id, status, before=before, after=after,
+                         approved_by=approved_by)
         for name, payload in atype.effects(params):
             self._outbox.enqueue(cur, action_id, name, {**payload, "action_id": str(action_id)})
