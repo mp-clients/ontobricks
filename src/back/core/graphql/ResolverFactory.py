@@ -161,14 +161,23 @@ class ResolverFactory:
                              risk_assessment: Optional[JSON] = None) -> ActionMutationResult:
             svc = service_factory(info)
             ctx = ctx_factory(info, withdrawal_id)
+            # purpose-built resolver for the reviewWithdrawal field; the action type id is fixed by design
             res = svc.propose(
-                "review_withdrawal", withdrawal_id,
-                {"withdrawal_id": withdrawal_id, "recommendation": recommendation,
-                 "rationale": rationale, "risk_assessment": risk_assessment},
-                ctx)
+                "review_withdrawal",
+                withdrawal_id,
+                {
+                    "withdrawal_id": withdrawal_id,
+                    "recommendation": recommendation,
+                    "rationale": rationale,
+                    "risk_assessment": risk_assessment,
+                },
+                ctx,
+            )
             return ActionMutationResult(
                 action_id=str(res.action_id) if res.action_id else None,
-                status=res.status, errors=list(res.errors))
+                status=res.status,
+                errors=list(res.errors),
+            )
         return reviewWithdrawal
 
     @staticmethod
