@@ -52,3 +52,22 @@ def test_override_resolver_catches_actionerror():
         service_factory=lambda info: _Svc(), ctx_factory=lambda info, oid: _Ctx())
     out = r(info=None, action_id="A1", decision="approve", reason="x")
     assert out.status == "ERROR" and out.errors and "override" in out.errors[0]
+
+
+def test_mutation_sdl_has_review_and_override():
+    from back.core.graphql.GraphQLSchemaBuilder import GraphQLSchemaBuilder
+    import strawberry
+
+    mut = GraphQLSchemaBuilder._build_mutation(
+        service_factory=lambda info: None, ctx_factory=lambda info, oid: None)
+
+    @strawberry.type
+    class Query:
+        @strawberry.field
+        def ping(self) -> str: return "ok"
+
+    sdl = strawberry.Schema(query=Query, mutation=mut).as_str()
+    assert "reviewWithdrawal" in sdl
+    assert "overrideAction" in sdl
+    # slice-3 governance fields remain
+    assert "approveAction" in sdl and "rejectAction" in sdl

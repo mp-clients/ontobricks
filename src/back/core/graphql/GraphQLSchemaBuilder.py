@@ -532,6 +532,18 @@ class GraphQLSchemaBuilder:
                     service_factory=service_factory, ctx_factory=ctx_factory),
                 description="Reject a PROPOSED action with an optional reason.",
             ),
+            strawberry.field(
+                name="reviewWithdrawal",
+                resolver=ResolverFactory.make_review_withdrawal_resolver(
+                    service_factory=service_factory, ctx_factory=ctx_factory),
+                description="Agent proposes an approve/reject decision on a risky withdrawal.",
+            ),
+            strawberry.field(
+                name="overrideAction",
+                resolver=ResolverFactory.make_override_resolver(
+                    service_factory=service_factory, ctx_factory=ctx_factory),
+                description="Human overrides a PROPOSED action with their own decision + reason.",
+            ),
         ]
         return create_type("Mutation", mutation_fields)
 
