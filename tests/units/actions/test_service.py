@@ -20,6 +20,7 @@ class _AutoFlag(ActionType):
 
 class _ApprovalFlag(_AutoFlag):
     id = "approval_flag"; approval_policy = ApprovalPolicy.REQUIRES_APPROVAL
+    requires_separate_approver = True
 
 def _svc(conn):
     reg = ActionRegistry(); reg.register(_AutoFlag()); reg.register(_ApprovalFlag())
@@ -53,8 +54,8 @@ def test_unknown_type_raises():
         _svc(FakeConn()).propose("nope", "C1", {"severity": "x"}, _ctx())
 
 
-def _row(status):
-    return ("approval_flag", "customers", "Customer", "C1", {"severity": "high"}, status)
+def _row(status, actor="proposer@x"):
+    return ("approval_flag", "customers", "Customer", "C1", {"severity": "high"}, status, actor)
 
 
 def test_approve_applies_proposed_action():
@@ -96,3 +97,23 @@ def test_revert_applied_action():
     res = _svc(conn).revert(uuid.uuid4(), _ctx())
     assert res.status == "REVERTED"
     assert "reverted" in " ".join(conn.cursor_obj.executed).lower()
+
+
+def test_sod_blocks_self_approval():
+    conn = FakeConn(rows=[_row("PROPOSED", actor="alice@x")])
+    with pytest.raises(ActionError):
+        _svc(conn).approve(uuid.uuid4(), "alice@x", _ctx())
+
+
+def test_sod_allows_different_approver():
+    conn = FakeConn(rows=[_row("PROPOSED", actor="alice@x")])
+    res = _svc(conn).approve(uuid.uuid4(), "bob@x", _ctx())
+    assert res.status == "APPLIED"
+
+
+def test_reject_records_reason():
+    conn = FakeConn(rows=[_row("PROPOSED")])
+    res = _svc(conn).reject(uuid.uuid4(), "bob@x", reason="false positive")
+    assert res.status == "REJECTED"
+    flat = " ".join(str(p) for p in conn.cursor_obj.params)
+    assert "false positive" in flat

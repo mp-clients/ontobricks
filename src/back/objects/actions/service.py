@@ -77,13 +77,17 @@ class ActionService:
                     if rec["status"] != "PROPOSED":
                         raise ActionError(f"cannot approve action in status {rec['status']}")
                     atype = self._registry.get(rec["action_type"])
+                    if getattr(atype, "requires_separate_approver", False) \
+                            and approver == rec.get("actor"):
+                        raise ActionError(
+                            "4-eyes: the proposer cannot approve their own action")
                     params = atype.params_model(**rec["params"])
                     self._audit.mark(cur, action_id, "APPROVED", approved_by=approver)
                     self._apply(cur, atype, action_id, rec["object_id"], params, ctx)
         self._drain_effects()
         return ActionResult(action_id, "APPLIED")
 
-    def reject(self, action_id: uuid.UUID, approver: str) -> ActionResult:
+    def reject(self, action_id: uuid.UUID, approver: str, reason: str = "") -> ActionResult:
         """Reject a PROPOSED action without applying any overlay edits."""
         with self._connect() as conn, conn.transaction():
             with conn.cursor() as cur:
@@ -92,7 +96,8 @@ class ActionService:
                     raise ActionError(
                         f"cannot reject action in status "
                         f"{rec['status'] if rec else 'unknown'}")
-                self._audit.mark(cur, action_id, "REJECTED", approved_by=approver)
+                self._audit.mark(cur, action_id, "REJECTED", approved_by=approver,
+                                 after={"rejected_reason": reason} if reason else None)
         return ActionResult(action_id, "REJECTED")
 
     def revert(self, action_id: uuid.UUID, ctx: ActionContext) -> ActionResult:
