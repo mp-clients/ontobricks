@@ -16,17 +16,17 @@ def test_propose_approve_applies_and_reads_back():
     from tests.integration.actions.conftest import test_connect  # provides connect()
 
     svc = build_action_service(test_connect)
-    cid = f"itest-{uuid.uuid4().hex[:8]}"
+    wid = f"itest-{uuid.uuid4().hex[:8]}"
     ctx = ActionContext(
-        domain="customers",
+        domain="fraud",
         actor="itest",
         actor_kind="user",
         connect=test_connect,
     )
     r = svc.propose(
-        "flag_customer_high_risk",
-        cid,
-        {"customer_id": cid, "severity": "high", "reason": "sanctions"},
+        "review_withdrawal",
+        wid,
+        {"withdrawal_id": wid, "recommendation": "reject", "rationale": "velocity spike"},
         ctx,
     )
     assert r.status == "PROPOSED"
@@ -34,8 +34,8 @@ def test_propose_approve_applies_and_reads_back():
     assert r2.status == "APPLIED"
     with test_connect() as conn, conn.cursor() as cur:
         assert (
-            OverlayStore("customers").current_value(
-                cur, "Customer", cid, "riskFlag"
-            )["severity"]
-            == "high"
+            OverlayStore("fraud").current_value(
+                cur, "Withdrawal", wid, "decision"
+            )["agent_recommendation"]
+            == "reject"
         )

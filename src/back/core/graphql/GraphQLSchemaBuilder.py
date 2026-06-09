@@ -506,20 +506,11 @@ class GraphQLSchemaBuilder:
     def _build_mutation(service_factory, ctx_factory) -> type:
         """Build a Strawberry Mutation type with action fields.
 
-        Currently exposes a single ``flagCustomerHighRisk`` field.  Additional
-        action fields can be appended to *mutation_fields* here as new action
-        types are registered.
+        Exposes: ``approveAction``, ``rejectAction``, ``reviewWithdrawal``,
+        ``overrideAction``.  Additional fields can be appended to
+        *mutation_fields* here as new action types are registered.
         """
         mutation_fields = [
-            strawberry.field(
-                name="flagCustomerHighRisk",
-                resolver=ResolverFactory.make_action_mutation_resolver(
-                    service_factory=service_factory,
-                    type_id="flag_customer_high_risk",
-                    ctx_factory=ctx_factory,
-                ),
-                description="Propose flagging a customer high-risk (requires approval).",
-            ),
             strawberry.field(
                 name="approveAction",
                 resolver=ResolverFactory.make_approve_resolver(

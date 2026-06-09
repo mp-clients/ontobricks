@@ -94,29 +94,6 @@ class ResolverFactory:
         return resolver
 
     @staticmethod
-    def make_action_mutation_resolver(service_factory, type_id, ctx_factory):
-        """Resolver for a strawberry Mutation field that proposes an action."""
-
-        def flagCustomerHighRisk(
-            info: Info, customer_id: str, severity: str, reason: str = ""
-        ) -> ActionMutationResult:
-            svc = service_factory(info)
-            action_ctx = ctx_factory(info, customer_id)
-            res = svc.propose(
-                type_id,
-                customer_id,
-                {"customer_id": customer_id, "severity": severity, "reason": reason},
-                action_ctx,
-            )
-            return ActionMutationResult(
-                action_id=str(res.action_id) if res.action_id else None,
-                status=res.status,
-                errors=list(res.errors),
-            )
-
-        return flagCustomerHighRisk
-
-    @staticmethod
     def make_approve_resolver(service_factory, ctx_factory):
         """Mutation resolver: approve a PROPOSED action (approver = current user)."""
         from back.objects.actions.service import ActionError
