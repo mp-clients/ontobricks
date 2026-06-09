@@ -151,3 +151,41 @@ class ResolverFactory:
                 return ActionMutationResult(action_id=str(action_id), status="ERROR",
                                             errors=[str(exc)])
         return rejectAction
+
+    @staticmethod
+    def make_review_withdrawal_resolver(service_factory, ctx_factory):
+        """Mutation resolver: an agent proposes a withdrawal-review decision."""
+
+        def reviewWithdrawal(info: Info, withdrawal_id: str, recommendation: str,
+                             rationale: str = "",
+                             risk_assessment: Optional[JSON] = None) -> ActionMutationResult:
+            svc = service_factory(info)
+            ctx = ctx_factory(info, withdrawal_id)
+            res = svc.propose(
+                "review_withdrawal", withdrawal_id,
+                {"withdrawal_id": withdrawal_id, "recommendation": recommendation,
+                 "rationale": rationale, "risk_assessment": risk_assessment},
+                ctx)
+            return ActionMutationResult(
+                action_id=str(res.action_id) if res.action_id else None,
+                status=res.status, errors=list(res.errors))
+        return reviewWithdrawal
+
+    @staticmethod
+    def make_override_resolver(service_factory, ctx_factory):
+        """Mutation resolver: a human overrides a PROPOSED action with their own decision."""
+        from back.objects.actions.service import ActionError
+
+        def overrideAction(info: Info, action_id: strawberry.ID, decision: str,
+                           reason: str) -> ActionMutationResult:
+            svc = service_factory(info)
+            ctx = ctx_factory(info, None)
+            try:
+                res = svc.override(str(action_id), ctx.actor, decision, reason, ctx)
+                return ActionMutationResult(
+                    action_id=str(res.action_id) if res.action_id else None,
+                    status=res.status, errors=list(res.errors))
+            except ActionError as exc:
+                return ActionMutationResult(action_id=str(action_id), status="ERROR",
+                                            errors=[str(exc)])
+        return overrideAction
