@@ -1,0 +1,203 @@
+## Fraud withdrawal review — slice 4 (decision loop)
+
+### Context
+Completes the kinetic fraud-withdrawal review loop. The `review_withdrawal` ActionType
+(slice 1's `flag_customer_high_risk` proof-of-seam has been retired) lets an agent propose
+an approve/reject decision on a risky Withdrawal object; a human then either accepts it
+(`approveAction`, 4-eyes enforced) or overrides it with their own decision (`overrideAction`,
+mandatory reason). The `OVERRIDDEN` status is a new terminal state alongside `APPLIED`.
+The `Withdrawal.decision` overlay field is live for read-back via GraphQL. Effect is still
+`noop_log`; the real moneypool main-app API write-back and the real fraud-scoring agent are
+deferred to later slices. Approver RBAC also remains deferred.
+
+### Changes
+1. `src/back/objects/actions/types/review_withdrawal.py` — new `ReviewWithdrawal` ActionType:
+   `id="review_withdrawal"`, `object_type="Withdrawal"`, `overlay_fields=["decision"]`,
+   `requires_separate_approver=True`, `approval_policy=REQUIRES_APPROVAL`. Params:
+   `withdrawal_id`, `recommendation` (approve|reject), `rationale`, `risk_assessment`.
+   `apply()` composes a `decision` overlay value `{agent_recommendation, human_decision,
+   agreed, decided_by, reason, decided_at}`. Effect: `noop_log`.
+2. `src/back/objects/actions/base.py` — `ActionStatus` gains `OVERRIDDEN`.
+3. `src/back/objects/actions/service.py` — `ActionService.override(action_id, approver,
+   decision, reason, ctx)` validates non-empty reason + PROPOSED status, builds an augmented
+   context with `decision_override`/`override_reason` in metadata, calls `_apply()` with
+   `status="OVERRIDDEN"`, and drains effects post-commit.
+4. `src/back/core/graphql/ResolverFactory.py` — `make_review_withdrawal_resolver` (proposes
+   via `reviewWithdrawal`); `make_override_resolver` (the `overrideAction` mutation).
+5. `src/back/core/graphql/GraphQLSchemaBuilder.py` — `_build_mutation` exposes
+   `reviewWithdrawal`, `overrideAction`, `approveAction`, `rejectAction`. `Withdrawal.decision`
+   read-back field attached via the overlay registry.
+6. `src/agents/tools/actions.py` — agent MCP tool re-pointed to `propose_review_withdrawal`
+   (was `propose_flag_customer_high_risk`). `ACTION_TOOL_DEFINITIONS` and
+   `ACTION_TOOL_HANDLERS` updated accordingly.
+7. Retirement of `flag_customer_high_risk`: `src/back/objects/actions/types/flag_customer_high_risk.py`
+   removed; its `flagCustomerHighRisk` mutation/resolver and associated tests removed.
+8. `scripts/seed_fraud_withdrawals.sql` — seed script for the fraud domain with sample
+   Withdrawal objects for manual testing.
+9. `docs/architecture.md`, `README.md` — Kinetic Actions section updated: describes the
+   fraud withdrawal review loop, `OVERRIDDEN` status, `overrideAction` mutation, and
+   `Withdrawal.decision` overlay shape; removes `flag_customer_high_risk` / `riskFlag`
+   references; lists deferred items (main-app write-back, fraud agent, RBAC).
+
+### Modified / added / removed files
+- `src/back/objects/actions/types/review_withdrawal.py` (added)
+- `src/back/objects/actions/types/flag_customer_high_risk.py` (removed)
+- `src/back/objects/actions/base.py` (modified — OVERRIDDEN status)
+- `src/back/objects/actions/service.py` (modified — override())
+- `src/back/core/graphql/ResolverFactory.py` (modified — make_review_withdrawal_resolver, make_override_resolver)
+- `src/back/core/graphql/GraphQLSchemaBuilder.py` (modified — _build_mutation wiring)
+- `src/agents/tools/actions.py` (modified — re-pointed to propose_review_withdrawal)
+- `scripts/seed_fraud_withdrawals.sql` (added)
+- `docs/architecture.md` (modified)
+- `README.md` (modified)
+- `changelogs/v0.4.0/2026-06-08.log` (modified — this entry)
+
+### Test result
+- `uv run pytest tests/units -q` → 2153 passed, 11 skipped, 2 failed.
+- The 2 failures are pre-existing and unrelated:
+  `tests/units/api/test_external_api.py::TestDomainVersions::{test_versions_not_found,
+  test_versions_success}` — "Registry not configured" in the offline test env; present
+  before this change. No new failures introduced by slice 4.
+
+---
+
+## Kinetic approve/reject mutations (slice 3)
+
+### Context
+Exposes the kinetic lifecycle's approve/reject over GraphQL so the full loop runs
+in-browser (propose → a *different* user approves → riskFlag reflects it), with
+per-ActionType segregation-of-duties (4-eyes). Foundational for AML-as-writer.
+Approver authorization (RBAC) is a deferred follow-up.
+
+### Changes
+1. `src/back/objects/actions/action_type.py` — `ActionType.requires_separate_approver:
+   bool = False` (4-eyes opt-in per type). `types/flag_customer_high_risk.py` sets it True.
+2. `src/back/objects/actions/audit.py` — `AuditLog.get` now SELECTs + returns `actor`
+   (the proposer) so approve can enforce 4-eyes.
+3. `src/back/objects/actions/service.py` — `approve` raises ActionError when
+   `requires_separate_approver` and approver == proposer (inside the txn, before any
+   write). `reject(action_id, approver, reason="")` records the reason in
+   `action_log.after.rejected_reason`.
+4. `src/back/core/graphql/ResolverFactory.py` — `make_approve_resolver` /
+   `make_reject_resolver` (annotated `-> ActionMutationResult`, catch ActionError →
+   `status="ERROR"` result). Inner closures named per-field (strawberry `create_type`
+   dedupes by resolver `__name__` — same-named closures would drop fields).
+5. `src/back/core/graphql/GraphQLSchemaBuilder.py` — `_build_mutation` adds
+   `approveAction(actionId)` / `rejectAction(actionId, reason)` to the Mutation type.
+6. `docs/architecture.md`, `README.md` — document the two mutations + 4-eyes; note RBAC deferred.
+
+### Modified / added files
+- src/back/objects/actions/action_type.py, types/flag_customer_high_risk.py, audit.py, service.py
+- src/back/core/graphql/ResolverFactory.py, GraphQLSchemaBuilder.py
+- tests/units/actions/test_sod_decl.py (new), test_approve_reject_mutation.py (new), test_service.py (updated)
+- docs/architecture.md, README.md
+
+### Test result
+- `uv run pytest tests/units` → 2143 passed, 11 skipped, 2 failed.
+- The 2 failures are pre-existing + unrelated (`test_external_api.py::TestDomainVersions`,
+  registry-not-configured offline). No new failures. Build-through-strawberry SDL check:
+  approveAction/rejectAction/flagCustomerHighRisk all present.
+
+---
+
+## Kinetic overlay read-back (slice 2)
+
+### Context
+Slice 2 completes the overlay read-back path introduced in the Kinetic Action Layer
+(slice 1). ActionTypes now declare which overlay fields they produce; the registry
+aggregates them; the GraphQL schema builder attaches a `JSON` scalar resolver per
+`(object_type, prop)` pair directly onto the per-domain GraphQL object types
+(e.g. `Customer.riskFlag`). The resolver queries `ontology_overlay` via the shared
+`overlay_connect` callable threaded through the graphql route — no extra connection
+ownership. `flag_customer_high_risk` declares `riskFlag` on `Customer` as the live
+proof-of-seam. Docs updated to reflect that read-back is no longer deferred.
+
+### Changes
+1. `src/back/objects/actions/action_type.py` — `ActionType` gains class attr
+   `overlay_fields: list[str] = []` (property names it writes on its `object_type`).
+   `src/back/objects/actions/types/flag_customer_high_risk.py` sets
+   `overlay_fields = ["riskFlag"]`.
+2. `src/back/objects/actions/registry.py` — `ActionRegistry.overlay_fields_by_type()`
+   aggregates declared property names across all registered types, returning
+   `dict[str, set[str]]` keyed by object type name (types with no fields omitted).
+3. `src/back/core/graphql/ResolverFactory.py` — `make_overlay_field_resolver`'s inner
+   resolver is annotated `-> Optional[JSON]` (so strawberry can build the field) and
+   wrapped in an error-isolating try/except (a read failure logs + returns `None`,
+   never breaks the query). Added `from strawberry.scalars import JSON`.
+4. `src/back/core/graphql/GraphQLSchemaBuilder.py` — `_add_overlay_fields` iterates
+   `overlay_fields_by_type()`, finds the matching plain Python class, and injects an
+   `Optional[JSON]` `strawberry.field` resolver per prop BEFORE `_apply_strawberry_types`
+   freezes it. `overlay_connect` + `domain` are threaded through `build_for_domain` →
+   `_build`; the schema cache key gains a `-o` suffix when overlays are attached.
+5. `src/back/fastapi/graphql_routes.py` — `_get_schema_and_context` passes the same
+   pooled `connect` callable (already built for the mutation factories) as
+   `overlay_connect` on the Lakebase-reachable path; query-only paths pass `None`.
+6. `docs/architecture.md` — Kinetic Actions "Entry points" section updated: read-back
+   is live (describes `overlay_fields`, registry aggregation, `_add_overlay_fields`,
+   and resolver threading). The slice-1 follow-up bullet deferring the riskFlag field
+   is removed. Two remaining follow-ups retained (real Effect connectors;
+   ontology-defined Action Types).
+7. `README.md` — Kinetic Actions blurb updated to note overlay read-back is live.
+
+### Modified / added files
+- `src/back/objects/actions/action_type.py` (modified)
+- `src/back/objects/actions/types/flag_customer_high_risk.py` (modified)
+- `src/back/objects/actions/registry.py` (modified)
+- `src/back/core/graphql/ResolverFactory.py` (modified)
+- `src/back/core/graphql/GraphQLSchemaBuilder.py` (modified)
+- `src/back/fastapi/graphql_routes.py` (modified)
+- `docs/architecture.md` (modified)
+- `README.md` (modified)
+
+### Test result
+- `uv run pytest -q` → 2134 passed, 12 skipped, 2 failed, 258 errors.
+- The 2 failures are pre-existing and unrelated:
+  `tests/units/api/test_external_api.py::TestDomainVersions::{test_versions_not_found,
+  test_versions_success}` — "Registry not configured" in the offline test env;
+  present before this change.
+- The 258 errors are all Playwright e2e tests (no browser installed in offline env);
+  also pre-existing and unrelated to this change.
+- No new failures introduced by slice 2.
+
+---
+
+## Multi-client deploy: CLIENT= wrapper + onboarding runbook
+
+### Context
+OntoBricks is operated per-client (multi-tenant); moneypool is the first client.
+This makes client selection a first-class deploy flag and documents the full
+new-client onboarding path (provision Lakebase → UC schema/volume → per-client
+config → deploy dev-lakebase → bind Postgres in UI → initialize registry).
+
+### Changes
+1. `Makefile` — `CONFIG` is now client-aware:
+   `CONFIG := scripts/deploy.config$(if $(strip $(CLIENT)),.$(strip $(CLIENT)),).sh`.
+   Added `CLIENT ?=` + `export CLIENT` so every config-sourcing target
+   (deploy, render-app-yaml, bootstrap-perms, bootstrap-lakebase, bundle-validate,
+   deploy-check) and the invoked `scripts/deploy.sh` all resolve the same
+   per-client config. Updated the help text to document `CLIENT=<name>`.
+2. `scripts/deploy.sh` — config loading honors `CLIENT`: selects
+   `scripts/deploy.config.<CLIENT>.sh` when set (else the default sandbox config),
+   still allows an explicit `CONFIG_FILE` override, and prints a helpful error
+   pointing at the expected per-client config when it is missing. Default
+   (no CLIENT) behavior is unchanged.
+3. `docs/client-onboarding.md` — new runbook: 11 steps from auth → Lakebase
+   provisioning → UC schema/volume → per-client config → first deploy (incl. the
+   "app already exists" bind fix) → UI Postgres binding + reading back the resource
+   path → registry initialize → optional SP grants → verification → optional LLM
+   auto-pipeline. Plus an everyday `make ... CLIENT=<client>` quick reference.
+
+### Modified / added files
+- Makefile (modified)
+- scripts/deploy.sh (modified)
+- docs/client-onboarding.md (added)
+
+### Test result
+- `uv run pytest tests/units` → 2044 passed, 12 skipped, 2 failed.
+- The 2 failures are pre-existing and unrelated
+  (`tests/units/api/test_external_api.py::TestDomainVersions::{test_versions_not_found,test_versions_success}`
+  — "Registry not configured" in the offline test env; present before this change).
+- Changes are shell (Makefile/deploy.sh) + docs only — no Python touched; verified
+  via `bash -n scripts/deploy.sh` and `make -n` dry-runs confirming CONFIG resolves
+  to `scripts/deploy.config.sh` (default) and `scripts/deploy.config.moneypool.sh`
+  (CLIENT=moneypool).

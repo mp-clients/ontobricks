@@ -1395,18 +1395,18 @@ See [API Documentation](api.md) for complete endpoint reference.
 
 ## Kinetic Actions
 
-The **Kinetic Action Layer** (`src/back/objects/actions/`) is a typed, audited mutation path that sits between the GraphQL API and the authoritative Lakebase overlay. All writes that change domain object state (risk flags, status transitions, approvals) flow through this layer — nothing bypasses it.
+The **Kinetic Action Layer** (`src/back/objects/actions/`) is a typed, audited mutation path that sits between the GraphQL API and the authoritative Lakebase overlay. All writes that change domain object state (status transitions, approvals, overrides) flow through this layer — nothing bypasses it.
 
 ### Action Types
 
-Action Types are code-registered descriptors (class-level `id` + `object_type`) that declare their params model (Pydantic), validation rules, overlay edits, and outbound effects. Today one type ships — `flag_customer_high_risk` — as a proof-of-seam; the next slice moves type definitions from Python classes to ontology-managed records so domain experts can configure them without a code deploy.
+Action Types are code-registered descriptors (class-level `id` + `object_type`) that declare their params model (Pydantic), validation rules, overlay edits, and outbound effects. The current shipping type is `review_withdrawal` — an agent proposes an approve/reject decision on a risky withdrawal; a human accepts or overrides it. A future slice will move type definitions from Python classes to Lakebase records so domain experts can configure them without a code deploy.
 
 ### ActionService — the single mutation path
 
 `ActionService.propose(type_id, object_id, params, ctx)` is the only way to mutate overlay state:
 
 1. **Validate** — registry lookup + Pydantic params parse + `ActionType.validate`.
-2. **Lifecycle** — if `ApprovalPolicy.AUTO` the action is immediately applied; if `REQUIRES_APPROVAL` it stays `PROPOSED` until an explicit `approve` call.
+2. **Lifecycle** — if `ApprovalPolicy.AUTO` the action is immediately applied; if `REQUIRES_APPROVAL` it stays `PROPOSED` until an explicit `approve` or `override` call.
 3. **One transaction** — overlay upsert (`ontology_overlay`), audit record (`action_log`), and effect rows (`action_effects_outbox`) all commit atomically via the shared Lakebase connection.
 4. **Post-commit drain** — after the transaction exits, `_drain_effects()` schedules a background task (`task_manager.run_background_task`) that runs the `EffectRunner` against the outbox. Effect failures are isolated in the outbox row and never surface to the caller.
 
@@ -1416,29 +1416,67 @@ Approved/applied actions write into `ontology_overlay` (Lakebase Postgres). The 
 
 ### Immutable action log
 
-`action_log` is append-only. Every state transition (PROPOSED → APPROVED/APPLIED/REJECTED/REVERTED) is a new `UPDATE` to the `status` column; the original row is preserved. `AuditLog.get` returns the current record. (A GraphQL query resolver to expose the log is a future follow-up; not yet wired.)
+`action_log` is append-only. Every state transition (PROPOSED → APPROVED/APPLIED/REJECTED/REVERTED/OVERRIDDEN) is recorded. `AuditLog.get` returns the current record. (A GraphQL query resolver to expose the log is a future follow-up; not yet wired.)
 
 ### Effect outbox
 
 `action_effects_outbox` decouples effect delivery from the action transaction. `EffectRunner` claims pending rows, dispatches them to registered `Effect` handlers, and marks each `DONE` or `FAILED`. Only `NoopLogEffect` (logs the payload) is live today; real connectors (Delta sync, SAP, webhook) register under a string key with no changes to `ActionService`.
 
+### Fraud withdrawal review loop
+
+The current proof-of-seam is the **fraud withdrawal review** loop, driven by the `review_withdrawal` action type (`src/back/objects/actions/types/review_withdrawal.py`):
+
+- **`ReviewWithdrawal`** — `id="review_withdrawal"`, `object_type="Withdrawal"`, `overlay_fields=["decision"]`, `requires_separate_approver=True`, `approval_policy=REQUIRES_APPROVAL`.
+- **Params** — `withdrawal_id`, `recommendation` (`approve` | `reject`), `rationale` (string), `risk_assessment` (optional dict for structured risk detail).
+- **`apply()`** — writes a `decision` overlay value onto the Withdrawal object:
+  ```json
+  {
+    "agent_recommendation": "approve" | "reject",
+    "human_decision":       "approve" | "reject",
+    "agreed":               true | false,
+    "decided_by":           "<actor>",
+    "reason":               "<override reason or empty>",
+    "decided_at":           "<ISO-8601 UTC>"
+  }
+  ```
+  When the human accepts the agent's recommendation (`approveAction`), `agreed` is `true` and `reason` is empty. When the human overrides (`overrideAction`), `agreed` is `false` and `reason` carries the required justification.
+- **Effect** — currently `noop_log` (logs the withdrawal id). The real moneypool main-app API write-back is deferred to a later slice.
+- **Fraud agent** — the real risk-scoring agent (computes `recommendation` + `risk_assessment` from transaction data) is also deferred to a later slice. Today the agent tool lets a human or test harness propose the decision directly.
+
+### ActionStatus
+
+`ActionStatus` (defined in `src/back/objects/actions/base.py`) includes: `PROPOSED`, `APPROVED`, `APPLIED`, `REJECTED`, `REVERTED`, `FAILED`, and **`OVERRIDDEN`**. An `OVERRIDDEN` action has had its agent recommendation replaced by a human decision in the same transaction.
+
+### ActionService.override
+
+`ActionService.override(action_id, approver, decision, reason, ctx)` handles the case where a human disagrees with the agent's recommendation. It:
+1. Requires `decision` to be `"approve"` or `"reject"` and `reason` to be non-empty.
+2. Checks the action is in `PROPOSED` status.
+3. Builds an augmented context with `decision_override` and `override_reason` in `metadata` so `apply()` composes the correct `decision` overlay value.
+4. Calls `_apply(...)` with `status="OVERRIDDEN"` — writing the overlay and marking the audit row in one transaction.
+5. Drains the effect outbox post-commit.
+
 ### Entry points
 
-- **GraphQL mutation** — the Mutation type (added when Lakebase is available; see `src/back/fastapi/graphql_routes.py`) now exposes three fields, all returning `{actionId, status, errors}`:
-  - `flagCustomerHighRisk(customerId, severity, reason)` — propose flagging a customer high-risk.
-  - `approveAction(actionId)` — approve a PROPOSED action; the approver is the current request user (`ctx.actor`). **4-eyes is enforced per `ActionType`**: when `ActionType.requires_separate_approver` is `True` (set on `FlagCustomerHighRisk`), `ActionService.approve` raises an `ActionError` if the approver equals the original proposer. The check lives in `src/back/objects/actions/service.py`; the resolver is `ResolverFactory.make_approve_resolver` in `src/back/core/graphql/ResolverFactory.py`. **Approver role-gating (RBAC) is a deferred follow-up** — current safety is the PROPOSED-state guard plus 4-eyes.
-  - `rejectAction(actionId, reason)` — reject a PROPOSED action; the optional `reason` string is recorded in the `action_log` audit row (`after.rejected_reason`). Resolver: `ResolverFactory.make_reject_resolver`.
-- **Agent tool** — `src/agents/tools/actions.py` exposes `ACTION_TOOL_DEFINITIONS`/`ACTION_TOOL_HANDLERS` so LLM agents can propose actions directly.
-- **Read-back** — overlay-backed read-back fields are live. Each `ActionType` declares `overlay_fields: list[str]` (property names it writes on its `object_type`); `ActionRegistry.overlay_fields_by_type()` aggregates them into `dict[str, set[str]]`; `GraphQLSchemaBuilder._add_overlay_fields` attaches a `JSON` scalar field per declared `(object_type, prop)` to the matching per-domain GraphQL object type (e.g. `Customer.riskFlag`). The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection.
+- **GraphQL mutations** — the Mutation type (added when Lakebase is available; see `src/back/fastapi/graphql_routes.py`) exposes four fields, all returning `{actionId, status, errors}`:
+  - `reviewWithdrawal(withdrawalId, recommendation, rationale, riskAssessment)` — agent (or test harness) proposes an approve/reject decision on a withdrawal. Resolver: `ResolverFactory.make_review_withdrawal_resolver`. Always proposes with `action_type="review_withdrawal"`.
+  - `approveAction(actionId)` — approve a PROPOSED action; the approver is the current request user (`ctx.actor`). **4-eyes is enforced**: `ActionService.approve` raises an `ActionError` if the approver equals the original proposer. Resolver: `ResolverFactory.make_approve_resolver`.
+  - `rejectAction(actionId, reason)` — reject a PROPOSED action; the optional `reason` is recorded in the audit row. Resolver: `ResolverFactory.make_reject_resolver`.
+  - `overrideAction(actionId, decision, reason)` — human overrides the agent's recommendation with their own `decision` and a mandatory `reason`. Marks the action `OVERRIDDEN` and writes the `decision` overlay in the same transaction. Resolver: `ResolverFactory.make_override_resolver`. **Approver role-gating (RBAC) is a deferred follow-up.**
+- **Agent tool** — `src/agents/tools/actions.py` exposes the MCP tool `propose_review_withdrawal` (`ACTION_TOOL_DEFINITIONS` / `ACTION_TOOL_HANDLERS`) so LLM agents can propose withdrawal-review decisions directly.
+- **Read-back** — `Withdrawal.decision` is a live overlay-backed `JSON` scalar field. Each `ActionType` declares `overlay_fields: list[str]`; `ActionRegistry.overlay_fields_by_type()` aggregates them; `GraphQLSchemaBuilder._add_overlay_fields` attaches the resolver before the schema is frozen. The resolver queries `ontology_overlay` and returns the stored value (or `null`). The `graphql_routes` wiring passes the shared `overlay_connect` callable so the resolver reaches Lakebase without owning a connection.
 
 ### Spec and plan
 
-Full design rationale and the 12-task implementation plan live under `docs/superpowers/specs/2026-06-08-kinetic-action-layer-design.md` and `docs/superpowers/plans/2026-06-08-kinetic-action-layer.md`.
+Full design rationale and the implementation plan live under `docs/superpowers/specs/2026-06-08-kinetic-action-layer-design.md` and `docs/superpowers/plans/2026-06-08-kinetic-action-layer.md`.
 
 ### Follow-up slices
 
 The following items are tracked but not yet implemented:
 
+- **Moneypool main-app write-back** — replace `noop_log` with an HTTP callback to the moneypool main-app API after a withdrawal decision is applied or overridden.
+- **Real fraud agent** — the risk-scoring agent that computes `recommendation` + `risk_assessment` from transaction data.
+- **Approver RBAC** — role-gate `approveAction` / `overrideAction` so only users with the appropriate permission level can act.
 - **Real Effect connectors** — Delta sync, SAP, and webhook effects; all implement `Effect.run(payload)` and register under a string key.
 - **Ontology-defined Action Types** — move type definitions from Python classes to Lakebase records so domain experts configure them without a code deploy.
 
