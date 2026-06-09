@@ -4,7 +4,7 @@ from back.objects.actions.base import (
 
 def test_enums_have_expected_members():
     assert {s.value for s in ActionStatus} == {
-        "PROPOSED", "APPROVED", "APPLIED", "REJECTED", "REVERTED", "FAILED",
+        "PROPOSED", "APPROVED", "APPLIED", "REJECTED", "REVERTED", "OVERRIDDEN", "FAILED",
     }
     assert {p.value for p in ApprovalPolicy} == {"AUTO", "REQUIRES_APPROVAL"}
 

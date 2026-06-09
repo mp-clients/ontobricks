@@ -11,6 +11,7 @@ class ActionStatus(str, Enum):
     APPLIED = "APPLIED"
     REJECTED = "REJECTED"
     REVERTED = "REVERTED"
+    OVERRIDDEN = "OVERRIDDEN"
     FAILED = "FAILED"
 
 
