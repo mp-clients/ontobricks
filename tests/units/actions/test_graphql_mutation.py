@@ -6,7 +6,7 @@ from back.core.graphql.ResolverFactory import ResolverFactory
 def test_overlay_field_resolver_reads_current_value():
     class _Store:
         def current_value(self, cur, ot, oid, prop):
-            return {"severity": "high"}
+            return {"agent_recommendation": "reject", "human_decision": "reject", "agreed": True}
 
     class _C:
         def __enter__(s):
@@ -32,7 +32,7 @@ def test_overlay_field_resolver_reads_current_value():
     class Obj:
         id = "W1"
 
-    assert resolver(Obj())["severity"] == "high"
+    assert resolver(Obj())["agent_recommendation"] == "reject"
 
 
 def test_mutation_schema_builds_through_strawberry():
