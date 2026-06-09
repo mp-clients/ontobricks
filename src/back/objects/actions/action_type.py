@@ -19,6 +19,8 @@ class ActionType(ABC):
     # Property names this Action writes on `object_type`, exposed as
     # overlay-backed read-back fields on the GraphQL type. Default empty.
     overlay_fields: List[str] = []
+    # When True, approve() requires a different user than the proposer (4-eyes).
+    requires_separate_approver: bool = False
 
     @abstractmethod
     def validate(self, ctx: ActionContext, params: BaseModel) -> List[str]:

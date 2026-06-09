@@ -41,13 +41,13 @@ class AuditLog:
     def get(self, cur: Any, action_id: uuid.UUID) -> Optional[dict]:
         """Fetch a single action_log row by UUID, or None if not found."""
         cur.execute(
-            "SELECT action_type, domain, object_type, object_id, params, status "
+            "SELECT action_type, domain, object_type, object_id, params, status, actor "
             "FROM action_log WHERE action_id=%s", (str(action_id),))
         row = cur.fetchone()
         if not row:
             return None
         return {"action_type": row[0], "domain": row[1], "object_type": row[2],
-                "object_id": row[3], "params": row[4], "status": row[5]}
+                "object_id": row[3], "params": row[4], "status": row[5], "actor": row[6]}
 
 
 class EffectOutbox:
